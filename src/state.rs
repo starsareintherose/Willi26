@@ -134,9 +134,9 @@ impl State {
         self.watch_t0 = Some(now);
 
         if let Some(dt) = dt {
-            self.write_line(&format!("[watch] {label}: {:.3}s", dt.as_secs_f64()))?;
+            self.write_line(&format!("watch {label}: {:.3}s", dt.as_secs_f64()))?;
         } else {
-            self.write_line(&format!("[watch] {label}: start"))?;
+            self.write_line(&format!("watch {label}: start"))?;
         }
         Ok(())
     }

@@ -180,6 +180,11 @@ impl Vm {
     /// collectable errors.
 
     fn exec_lenient(&mut self, cmd: Spanned<Command>, base_dir: &Path) -> Option<Error> {
+        /* Reset the per-command stopwatch so watch_note inside the command
+        only measures time spent within this command, not idle/typing time
+        since the previous command. */
+        self.state.watch_t0 = None;
+
         let t0 = if self.state.watch_enabled { Some(std::time::Instant::now()) } else { None };
 
         let cmd_dbg = if self.state.watch_enabled { Some(format!("{:?}", cmd.node)) } else { None };
