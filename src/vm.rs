@@ -180,24 +180,19 @@ impl Vm {
     /// collectable errors.
 
     fn exec_lenient(&mut self, cmd: Spanned<Command>, base_dir: &Path) -> Option<Error> {
-        /* Reset the per-command stopwatch so watch_note inside the command
-        only measures time spent within this command, not idle/typing time
-        since the previous command. */
-        self.state.watch_t0 = None;
-
         let t0 = if self.state.watch_enabled { Some(std::time::Instant::now()) } else { None };
-
-        let cmd_dbg = if self.state.watch_enabled { Some(format!("{:?}", cmd.node)) } else { None };
 
         let out = if let Err(e) = self.exec_strict(cmd, base_dir) { Some(e) } else { None };
 
-        if let (Some(t0), Some(cmd_dbg)) = (t0, cmd_dbg) {
-            let ms = t0.elapsed().as_millis();
-            /*
-              Use the normal writer so watch output follows the active log
-              routing rules.
-            */
-            let _ = self.state.write_line(&format!("watch {ms} ms {cmd_dbg}"));
+        if let Some(t0) = t0 {
+            let d = t0.elapsed();
+            let ms = d.as_millis();
+            let msg = if ms >= 1000 {
+                format!("watch {:.2} s", d.as_secs_f64())
+            } else {
+                format!("watch {ms} ms")
+            };
+            let _ = self.state.write_line(&msg);
         }
 
         out
@@ -519,29 +514,25 @@ impl Vm {
                 }
             },
 
-            Command::XReadRaw(raw) => {
-                self.state.watch_note("xread").map_err(Error::from)?;
-                match crate::engines::dataset::parse_xread_block(&raw) {
-                    Ok(ds) => {
-                        let nchar = ds.nchar;
-                        let title = ds.title.clone().unwrap_or_default();
-                        self.state.dataset = Some(ds);
-                        self.state.char_config =
-                            Some(crate::engines::ccode::CharConfig::new(nchar));
-                        self.state.clear_all_trees();
-                        self.state.outgroup = Some(crate::state::OutgroupState::new(vec![0]));
-                        self.state.write_line("xread").map_err(Error::from)?;
-                        self.state.write_line(&title).map_err(Error::from)?;
-                    }
-                    Err(e) => {
-                        return Err(Error::runtime(
-                            format!("xread parse error: {}", e.message),
-                            None,
-                            Some(span),
-                        ));
-                    }
+            Command::XReadRaw(raw) => match crate::engines::dataset::parse_xread_block(&raw) {
+                Ok(ds) => {
+                    let nchar = ds.nchar;
+                    let title = ds.title.clone().unwrap_or_default();
+                    self.state.dataset = Some(ds);
+                    self.state.char_config = Some(crate::engines::ccode::CharConfig::new(nchar));
+                    self.state.clear_all_trees();
+                    self.state.outgroup = Some(crate::state::OutgroupState::new(vec![0]));
+                    self.state.write_line("xread").map_err(Error::from)?;
+                    self.state.write_line(&title).map_err(Error::from)?;
                 }
-            }
+                Err(e) => {
+                    return Err(Error::runtime(
+                        format!("xread parse error: {}", e.message),
+                        None,
+                        Some(span),
+                    ));
+                }
+            },
 
             Command::XReadQuery => {
                 let dump = {
@@ -756,7 +747,6 @@ impl Vm {
 
             Command::Hennig { multi, star } => {
                 self.state.ensure_dataset().map_err(|m| Error::runtime(m, None, Some(span)))?;
-                self.state.watch_note("hennig").map_err(Error::from)?;
 
                 let ds = self.state.dataset.as_ref().unwrap();
                 let cfg = self.state.char_config.as_ref().unwrap();
@@ -801,7 +791,6 @@ impl Vm {
 
             Command::Bb { star } => {
                 self.state.ensure_dataset().map_err(|m| Error::runtime(m, None, Some(span)))?;
-                self.state.watch_note("bb").map_err(Error::from)?;
 
                 let ds = self.state.dataset.as_ref().unwrap();
                 let cfg = self.state.char_config.as_ref().unwrap();
@@ -893,8 +882,6 @@ impl Vm {
             }
 
             Command::Nelsen => {
-                self.state.watch_note("nelsen").map_err(Error::from)?;
-
                 ensure_tree_context(&self.state)
                     .map_err(|m| Error::runtime(m, None, Some(span)))?;
 
@@ -1614,7 +1601,6 @@ impl Vm {
 
             Command::Watch(on) => {
                 self.state.watch_enabled = on;
-                self.state.watch_t0 = None;
                 self.state.write_line(&format!("watch *")).map_err(Error::from)?;
             }
 

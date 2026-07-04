@@ -81,7 +81,6 @@ pub struct State {
     pub procedure_exec_enabled: bool,
     /* watch */
     pub watch_enabled: bool,
-    pub watch_t0: Option<std::time::Instant>,
 
     pub should_quit: bool,
 }
@@ -105,7 +104,6 @@ impl State {
             tree_slots: HashMap::new(),
             tree_plot_style: TPlotStyle::Unicode,
             watch_enabled: false,
-            watch_t0: None,
         }
     }
     /// writes one output line to the terminal and/or active log file according to
@@ -122,24 +120,7 @@ impl State {
         }
         Ok(())
     }
-    /// emits stopwatch timing information and advances the watch checkpoint when
-    /// `watch;` is active.
 
-    pub fn watch_note(&mut self, label: &str) -> io::Result<()> {
-        if !self.watch_enabled {
-            return Ok(());
-        }
-        let now = std::time::Instant::now();
-        let dt = self.watch_t0.map(|t0| now.duration_since(t0));
-        self.watch_t0 = Some(now);
-
-        if let Some(dt) = dt {
-            self.write_line(&format!("watch {label}: {:.3}s", dt.as_secs_f64()))?;
-        } else {
-            self.write_line(&format!("watch {label}: start"))?;
-        }
-        Ok(())
-    }
     /// validates that character data has been loaded before commands that require
     /// a dataset run.
 
