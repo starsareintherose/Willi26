@@ -8,6 +8,8 @@ Cross compilation needs following dependencies installed:
 
 * aarch64-linux-gnu-gcc: for cross compiling to aarch64 Linux
 
+* riscv64-linux-gnu-gcc: for cross compiling to RISC-V Linux
+
 * osxcross: for cross compiling to macOS
 
 * mingw-w64-gcc: for cross compiling to Windows

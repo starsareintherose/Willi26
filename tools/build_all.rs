@@ -60,31 +60,18 @@ fn command_exists(program: &str, path_env: &OsString) -> bool {
 }
 
 fn run_command(mut cmd: Command) -> Result<()> {
-
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+    let status =
+        cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()?;
 
     if !status.success() {
-        return Err(BuildError::new(format!(
-            "command failed with status: {}",
-            status
-        )));
+        return Err(BuildError::new(format!("command failed with status: {}", status)));
     }
 
     Ok(())
 }
 
 fn run_command_allow_fail(mut cmd: Command) {
-
-    match cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-    {
+    match cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
         Ok(status) if status.success() => {}
         Ok(status) => {
             eprintln!("warning: command failed but ignored: {}", status);
@@ -106,6 +93,7 @@ fn add_targets(path_env: &OsString) -> Result<()> {
     let targets = [
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-gnu",
+        "riscv64gc-unknown-linux-gnu",
         "x86_64-pc-windows-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
@@ -129,12 +117,7 @@ fn target_env_name(target: &str) -> String {
         .collect()
 }
 
-fn strip_if_exists(
-    strip_bin: &str,
-    file_path: &Path,
-    strip_args: &[&str],
-    path_env: &OsString,
-) {
+fn strip_if_exists(strip_bin: &str, file_path: &Path, strip_args: &[&str], path_env: &OsString) {
     if command_exists(strip_bin, path_env) {
         println!("==> Stripping with {}", strip_bin);
 
@@ -180,11 +163,7 @@ fn show_binary(file_path: &Path, path_env: &OsString) -> Result<()> {
     }
 
     let meta = fs::metadata(file_path)?;
-    println!(
-        "{} {}",
-        human_size(meta.len()),
-        file_path.display()
-    );
+    println!("{} {}", human_size(meta.len()), file_path.display());
 
     Ok(())
 }
@@ -194,11 +173,7 @@ fn copy_to_bin(out: &Path, bin: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cargo_build(
-    target: &str,
-    envs: &[(&str, &str)],
-    path_env: &OsString,
-) -> Result<()> {
+fn cargo_build(target: &str, envs: &[(&str, &str)], path_env: &OsString) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.env("PATH", path_env);
 
@@ -206,10 +181,7 @@ fn cargo_build(
         cmd.env(k, v);
     }
 
-    cmd.arg("build")
-        .arg("--release")
-        .arg("--target")
-        .arg(target);
+    cmd.arg("build").arg("--release").arg("--target").arg(target);
 
     run_command(cmd)
 }
@@ -230,14 +202,7 @@ fn build_linux(
     let out = PathBuf::from(format!("target/{}/release/{}", target, BIN_NAME));
     let bin = PathBuf::from(format!("{}/{}-linux-{}", DIST_DIR, BIN_NAME, arch));
 
-    cargo_build(
-        target,
-        &[
-            (&linker_key, linker),
-            ("RUSTFLAGS", rustflags),
-        ],
-        path_env,
-    )?;
+    cargo_build(target, &[(&linker_key, linker), ("RUSTFLAGS", rustflags)], path_env)?;
 
     strip_if_exists(strip_bin, &out, &[], path_env);
 
@@ -266,10 +231,7 @@ fn build_windows_gnu(
         target,
         &[
             (&linker_key, linker),
-            (
-                "RUSTFLAGS",
-                "-C target-feature=+crt-static -C link-args=-static -C link-arg=-s",
-            ),
+            ("RUSTFLAGS", "-C target-feature=+crt-static -C link-args=-static -C link-arg=-s"),
         ],
         path_env,
     )?;
@@ -295,10 +257,7 @@ fn build_macos_darwin(config: MacosBuild<'_>, path_env: &OsString) -> Result<()>
     println!("\n==> Building macOS {}", config.arch);
 
     let out = PathBuf::from(format!("target/{}/release/{}", config.target, BIN_NAME));
-    let bin = PathBuf::from(format!(
-        "{}/{}-macos-{}",
-        DIST_DIR, BIN_NAME, config.arch
-    ));
+    let bin = PathBuf::from(format!("{}/{}-macos-{}", DIST_DIR, BIN_NAME, config.arch));
 
     match config.target {
         "x86_64-apple-darwin" => {
@@ -330,10 +289,7 @@ fn build_macos_darwin(config: MacosBuild<'_>, path_env: &OsString) -> Result<()>
             )?;
         }
         other => {
-            return Err(BuildError::new(format!(
-                "unsupported macOS target: {}",
-                other
-            )));
+            return Err(BuildError::new(format!("unsupported macOS target: {}", other)));
         }
     }
 
@@ -390,12 +346,22 @@ fn main_result() -> Result<()> {
         &path_env,
     )?;
 
-   /* requirement: aarch64-linux-gnu-gcc */
+    /* requirement: aarch64-linux-gnu-gcc */
     build_linux(
         "aarch64",
         "aarch64-unknown-linux-gnu",
         "aarch64-linux-gnu-gcc",
         "aarch64-linux-gnu-strip",
+        "-C link-arg=-s",
+        &path_env,
+    )?;
+
+    /* requirement: riscv64-linux-gnu-gcc */
+    build_linux(
+        "riscv64",
+        "riscv64gc-unknown-linux-gnu",
+        "riscv64-linux-gnu-gcc",
+        "riscv64-linux-gnu-strip",
         "-C link-arg=-s",
         &path_env,
     )?;

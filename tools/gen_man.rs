@@ -5,8 +5,7 @@ use std::io;
 use std::path::Path;
 
 fn escape_roff(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('-', "\\-")
+    s.replace('\\', "\\\\").replace('-', "\\-")
 }
 
 fn main() -> io::Result<()> {
