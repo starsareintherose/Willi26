@@ -1,6 +1,6 @@
 # Willi26: A counterfeit of Hennig86
 
-A Hennig86-compatible parsimony program written in safe Rust without third-party crates.
+An interactive parsimony phylogenetic analysis program written in safe Rust without third-party crates.
 
 It provides a command-driven workflow for reading discrete character matrices, searching for most-parsimonious trees, calculating consensus trees, and producing tree lists or simple tree plots.
 
