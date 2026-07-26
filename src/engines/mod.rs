@@ -7,7 +7,7 @@ pub mod branchswap;
 /// Character-coding configuration (additive, weight, active/inactive).
 pub mod ccode;
 /// Strict consensus (nelsen) tree construction.
-pub mod con;
+pub mod consensus;
 /// Character matrix parsing, storage, and state-set utilities.
 pub mod dataset;
 /// Implicit enumeration (exact branch-and-bound search).
@@ -144,8 +144,8 @@ impl Engine {
         cfg: &ccode::CharConfig,
         trees: &[crate::engines::trees::Tree],
         outgroups: &[usize],
-    ) -> Result<con::ConsensusOutcome> {
-        crate::engines::con::nelsen_consensus(ds, cfg, trees, outgroups)
+    ) -> Result<consensus::ConsensusOutcome> {
+        crate::engines::consensus::nelsen_consensus(ds, cfg, trees, outgroups)
             .map_err(|m| crate::error::Error::runtime(m, None, None))
     }
 }
