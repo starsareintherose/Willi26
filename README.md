@@ -1,6 +1,6 @@
-# Willi26: A counterfeit of Hennig86
+# Willi26: An interactive parsimony phylogenetic analysis program 
 
-An interactive parsimony phylogenetic analysis program written in safe Rust without third-party crates.
+An interactive parsimony phylogenetic analysis program, developed in safe Rust without third-party dependencies. Its command-driven interface follows theHennig86 tradition while providing an independent modern implementation.
 
 It provides a command-driven workflow for reading discrete character matrices, searching for most-parsimonious trees, calculating consensus trees, and producing tree lists or simple tree plots.
 
@@ -28,7 +28,7 @@ For the command reference, see [here](docs/manual.md).
 
 ## Notes
 
-Legacy DOS-related commands, e.g. `batch`, may be accepted as placeholders but are not necessarily implemented.
+Legacy DOS-related commands, e.g. `batch`, are accepted as placeholders but not implemented.
 
 For reproducible analyses, keep the full command sequence in a procedure file and run it using the following syntax in willi26:
 
@@ -50,3 +50,6 @@ Generate the Rust API documentation:
 cargo doc
 ```
 
+## License
+
+Willi26 is licensed under the GNU Affero General Public License v3.0 or later.
