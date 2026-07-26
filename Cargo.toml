@@ -2,5 +2,25 @@
 name = "willi26"
 version = "0.0.1"
 edition = "2024"
+authors = ["Guoyi Zhang <starsareintherose@gmail.com>"]
+description = "An interactive parsimony phylogenetic analysis program inspired by Hennig86."
+license = "AGPL-3.0-or-later"
+keywords = ["bioinformatics", "evolution", "parsimony", "phylogenetics", "phylogeny"]
+categories = ["command-line-utilities", "science"]
+
+homepage = "https://github.com/starsareintherose/Willi26"
+repository = "https://github.com/starsareintherose/Willi26"
+documentation = "https://docs.rs/willi26"
+readme = "README.md"
+
+include = [
+    "/src/**",
+    "/docs/**",
+    "/examples/**",
+    "/tools/**",
+    "/README.md",
+    "/Cargo.toml",
+    "/LICENSE.md",
+]
 
 [dependencies]
