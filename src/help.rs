@@ -180,23 +180,42 @@ static TOPICS: &[HelpTopic] = &[
     HelpTopic {
         name: "tchoose",
         summary: "select trees in scope s from current tree file",
-        details: &["tchoose  s;     select trees in scope s from current tree file"],
+        details: &[
+            "tchoose  s;     select trees in scope s from current tree file",
+            "                s accepts n, a.b, and / for the last tree",
+        ],
     },
     HelpTopic {
         name: "tlist",
         summary: "display trees in parenthetical notation",
-        details: &["tlist;          display trees in parenthetical notation"],
+        details: &[
+            "tlist;          display trees in parenthetical notation",
+            "tlist s;        display trees in scope s",
+            "                s accepts n, a.b, and / for the last tree",
+        ],
     },
     HelpTopic {
         name: "tplot",
         summary: "produce tree diagrams",
-        details: &["tplot;          produce tree diagrams"],
+        details: &[
+            "tplot;          produce tree diagrams",
+            "tplot s;        produce tree diagrams in scope s",
+            "                s accepts n, a.b, and / for the last tree",
+        ],
     },
     HelpTopic { name: "tread", summary: "read trees", details: &["tread;          read trees"] },
     HelpTopic {
         name: "tsave",
         summary: "save current tree file on dos file n",
         details: &["tsave  n;       save current tree file on dos file n"],
+    },
+    HelpTopic {
+        name: "tsvg",
+        summary: "save one tree diagram as SVG file",
+        details: &[
+            "tsvg n f;       save tree n as SVG file f",
+            "                if n is /, last tree is chosen",
+        ],
     },
     HelpTopic {
         name: "txascii",

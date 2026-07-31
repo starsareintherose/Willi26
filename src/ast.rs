@@ -77,12 +77,13 @@ pub enum Command {
 
     /* reporting / tree info */
     TXAscii(bool),
-    TPlot,
+    TPlot(Vec<TreeSelector>),
     TRead { title: Option<String>, trees: Vec<String> },
-    TList,
+    TList(Vec<TreeSelector>),
     TSave(PathBuf),
+    Tsvg { tree: TreeSelector, path: PathBuf },
 
-    TChoose(Vec<TChooseItem>),
+    TChoose(Vec<TreeSelector>),
 
     XSteps(Vec<XStepsMode>),
     Steps,
@@ -162,11 +163,14 @@ pub enum CharRange {
     RangeInclusive(u32, u32),
 }
 
-/// Tree selection: single index or range.
+/// Tree selection used by commands that operate on a tree subset.
 #[derive(Debug, Clone)]
-pub enum TChooseItem {
+pub enum TreeSelector {
+    /// Select one zero-based tree index.
     Index(usize),
+    /// Select every tree in an inclusive zero-based range.
     RangeInclusive(usize, usize),
+    /// Select the last tree in the current working tree set.
     Last,
 }
 

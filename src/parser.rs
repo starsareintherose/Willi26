@@ -284,8 +284,14 @@ impl Parser {
             self.expect_semi()?;
             Command::TXAscii(enabled)
         } else if eq_ci(name_norm, "tplot") {
-            self.expect_semi()?;
-            Command::TPlot
+            if self.peek().map(|t| t.kind == TokenKind::Semi).unwrap_or(false) {
+                self.bump();
+                Command::TPlot(Vec::new())
+            } else {
+                let trees = self.parse_tplot_items()?;
+                self.expect_semi()?;
+                Command::TPlot(trees)
+            }
         } else if eq_ci(name_norm, "tread") {
             /* tread 'title' <tree> * <tree> ... ; */
             let title = if let Some(tok) = self.peek().cloned() {
@@ -305,12 +311,23 @@ impl Parser {
                 .map_err(|m| self.err_parse(m, Some(Span::new(start, self.last_end()))))?;
             Command::TRead { title, trees }
         } else if eq_ci(name_norm, "tlist") {
-            self.expect_semi()?;
-            Command::TList
+            if self.peek().map(|t| t.kind == TokenKind::Semi).unwrap_or(false) {
+                self.bump();
+                Command::TList(Vec::new())
+            } else {
+                let trees = self.parse_required_tree_selector_items("tlist")?;
+                self.expect_semi()?;
+                Command::TList(trees)
+            }
         } else if eq_ci(name_norm, "tsave") {
             let path = self.parse_path_like()?;
             self.expect_semi()?;
             Command::TSave(path)
+        } else if eq_ci(name_norm, "tsvg") {
+            let tree = self.parse_single_tree_selector("tsvg")?;
+            let path = self.parse_path_like()?;
+            self.expect_semi()?;
+            Command::Tsvg { tree, path }
         } else if eq_ci(name_norm, "xsteps") {
             /* `xsteps;` defaults to `xsteps l;`. */
             if let Some(tok) = self.peek().cloned() {
@@ -459,60 +476,93 @@ impl Parser {
     }
     /// parses `tchoose` selectors, including ranges and the `/` last-tree marker.
 
-    fn parse_tchoose_items(&mut self) -> Result<Vec<crate::ast::TChooseItem>> {
-        use crate::ast::TChooseItem;
+    fn parse_tchoose_items(&mut self) -> Result<Vec<crate::ast::TreeSelector>> {
+        self.parse_required_tree_selector_items("tchoose")
+    }
+    /// parses `tplot` selectors using the same selector syntax as `tchoose`.
+
+    fn parse_tplot_items(&mut self) -> Result<Vec<crate::ast::TreeSelector>> {
+        self.parse_required_tree_selector_items("tplot")
+    }
+    /// parses a single tree index selector for commands that operate on exactly
+    /// one tree.
+
+    fn parse_single_tree_selector(&mut self, command: &str) -> Result<crate::ast::TreeSelector> {
+        use crate::ast::TreeSelector;
         use crate::lexer::TokenKind;
 
-        let mut out: Vec<TChooseItem> = Vec::new();
+        let tok = self
+            .peek()
+            .cloned()
+            .ok_or_else(|| self.err_parse(format!("expected {command} tree number"), None))?;
+
+        match tok.kind {
+            TokenKind::Slash => {
+                self.bump();
+                Ok(TreeSelector::Last)
+            }
+            TokenKind::Number(_) => Ok(TreeSelector::Index(self.parse_usize()?)),
+            _ => Err(self.err_parse(
+                format!("{command} requires exactly one tree number or '/'"),
+                Some(tok.span),
+            )),
+        }
+    }
+    /// parses one or more tree selectors for commands where a non-empty selector
+    /// list is required.
+
+    fn parse_required_tree_selector_items(
+        &mut self,
+        command: &str,
+    ) -> Result<Vec<crate::ast::TreeSelector>> {
+        let out = self.parse_tree_selector_items(command)?;
+        if out.is_empty() {
+            return Err(self.err_parse(
+                format!("{command} requires at least one selector (e.g. 0, 0.3, /)"),
+                None,
+            ));
+        }
+        Ok(out)
+    }
+    /// parses tree selectors shared by `tchoose`, `tplot`, and `tlist`.
+
+    fn parse_tree_selector_items(
+        &mut self,
+        command: &str,
+    ) -> Result<Vec<crate::ast::TreeSelector>> {
+        use crate::ast::TreeSelector;
+        use crate::lexer::TokenKind;
+
+        let mut out: Vec<TreeSelector> = Vec::new();
 
         loop {
             let tok = self
                 .peek()
                 .cloned()
-                .ok_or_else(|| self.err_parse("expected tchoose selector", None))?;
+                .ok_or_else(|| self.err_parse(format!("expected {command} selector"), None))?;
 
             match tok.kind {
                 TokenKind::Semi => break,
-
-                /* tchoose /; */
                 TokenKind::Slash => {
                     self.bump();
-                    out.push(TChooseItem::Last);
+                    out.push(TreeSelector::Last);
                 }
-
-                /* tchoose 0 ...; */
                 TokenKind::Number(_) => {
                     let a = self.parse_usize()?;
                     if self.try_consume_discriminant(TokenKind::Dot) {
-                        /* tchoose 2.3; */
                         let b = self.parse_usize()?;
-                        out.push(TChooseItem::RangeInclusive(a, b));
+                        out.push(TreeSelector::RangeInclusive(a, b));
                     } else {
-                        out.push(TChooseItem::Index(a));
+                        out.push(TreeSelector::Index(a));
                     }
                 }
-
                 _ => {
                     return Err(self.err_parse(
-                        "expected tchoose selector: number, range a.b, '/', or ';'",
+                        format!("expected {command} selector: number, range a.b, '/', or ';'"),
                         Some(tok.span),
                     ));
                 }
             }
-
-            /* A following semicolon ends the list; otherwise parse another item. */
-            let Some(next) = self.peek() else {
-                break;
-            };
-            if matches!(next.kind, TokenKind::Semi) {
-                break;
-            }
-        }
-
-        if out.is_empty() {
-            return Err(
-                self.err_parse("tchoose requires at least one selector (e.g. 0, 0.3, /)", None)
-            );
         }
 
         Ok(out)
@@ -528,7 +578,8 @@ impl Parser {
             _ => Err(self.err_parse("expected number", Some(tok.span))),
         }
     }
-    /// accepts identifier or quoted path tokens for file commands.
+    /// accepts identifier/number/dot path fragments or quoted path tokens for
+    /// file commands.
 
     fn parse_path_like(&mut self) -> Result<PathBuf> {
         let tok = self.peek().cloned().ok_or_else(|| self.err_parse("expected path", None))?;
@@ -541,32 +592,33 @@ impl Parser {
             }));
         }
 
-        /* Consume one or more ident segments joined by `/` to support
-        directory paths like `test/xxx.ss`. */
-        let mut parts = Vec::new();
+        /* Consume path-like tokens directly so names like `0.svg` are valid. */
+        let mut path = String::new();
         loop {
             let tok = self.peek().cloned().ok_or_else(|| self.err_parse("expected path", None))?;
             match tok.kind {
-                TokenKind::Ident(s) => {
+                TokenKind::Ident(s) | TokenKind::Number(s) => {
                     self.bump();
-                    parts.push(s);
+                    path.push_str(&s);
+                }
+                TokenKind::Dot => {
+                    self.bump();
+                    path.push('.');
                 }
                 TokenKind::Slash => {
-                    if parts.is_empty() {
-                        parts.push(String::new());
-                    }
                     self.bump();
+                    path.push('/');
                 }
                 _ => break,
             }
         }
 
-        if parts.is_empty() {
+        if path.is_empty() {
             let tok = self.peek().cloned().ok_or_else(|| self.err_parse("expected path", None))?;
             return Err(self.err_parse("expected path token", Some(tok.span)));
         }
 
-        Ok(PathBuf::from(parts.join("/")))
+        Ok(PathBuf::from(path))
     }
     /// consumes a non-negative integer for character selectors and weights.
 
@@ -893,6 +945,7 @@ fn normalize_cmd_name(name: &str) -> &str {
         ("tplot", 2),     /* tp... */
         ("tread", 2),     /* tr... */
         ("tsave", 2),     /* ts... */
+        ("tsvg", 3),      /* tsv... */
         ("txascii", 2),   /* tx... */
         ("view", 1),      /* v... */
         ("watch", 1),     /* w... */

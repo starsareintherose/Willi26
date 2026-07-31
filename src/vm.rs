@@ -24,8 +24,8 @@ const ASSIST_CMD_LIST: &str = "\
 assist    batch     bb        bytes     ccode     cget      ckeep\n\
 display   erase     files     get       hennig    ie        keep\n\
 log       mhennig   nelsen    outgroup  procedure quote     reroot\n\
-steps     tchoose   tlist     tplot     tread     tsave     txascii\n\
-view      watch     xread     xsteps    xx        yama";
+steps     tchoose   tlist     tplot     tread     tsave     tsvg\n\
+txascii   view      watch     xread     xsteps    xx        yama";
 
 /// Command virtual machine: executes parsed commands, manages state, runs
 /// REPL.
@@ -1092,54 +1092,7 @@ impl Vm {
                     ));
                 }
 
-                /* Expand selectors into picked indices in command order. */
-                let mut picked: Vec<usize> = Vec::new();
-
-                for it in items {
-                    match it {
-                        crate::ast::TChooseItem::Last => {
-                            picked.push(n - 1);
-                        }
-                        crate::ast::TChooseItem::Index(i) => {
-                            if i >= n {
-                                return Err(Error::runtime(
-                                    format!("tchoose: index {i} out of range (n={n})"),
-                                    None,
-                                    Some(span),
-                                ));
-                            }
-                            picked.push(i);
-                        }
-                        crate::ast::TChooseItem::RangeInclusive(a, b) => {
-                            if a > b {
-                                return Err(Error::runtime(
-                                    "tchoose invalid range (a > b)",
-                                    None,
-                                    Some(span),
-                                ));
-                            }
-                            if b >= n {
-                                return Err(Error::runtime(
-                                    format!("tchoose range end {b} out of range (n={n})"),
-                                    None,
-                                    Some(span),
-                                ));
-                            }
-                            picked.extend(a..=b);
-                        }
-                    }
-                }
-
-                if picked.is_empty() {
-                    return Err(Error::runtime("tchoose no trees selected", None, Some(span)));
-                }
-
-                /*
-                  Deduplicate repeated selectors while preserving the first
-                  selected occurrence.
-                */
-                let mut seen = std::collections::HashSet::<usize>::new();
-                picked.retain(|i| seen.insert(*i));
+                let picked = expand_tree_selectors("tchoose", &items, n, span)?;
 
                 /* Clone selected trees first to avoid conflicting state borrows. */
                 let new_ts = {
@@ -1169,42 +1122,54 @@ impl Vm {
                 self.state.write_line(&format!("txascii *")).map_err(Error::from)?;
             }
 
-            Command::TPlot => {
+            Command::TPlot(trees) => {
                 if let Err(msg) = ensure_tree_context(&self.state) {
                     return Err(Error::runtime(msg, None, Some(span)));
                 }
 
-                let ds =
-                    self.state.dataset.as_ref().ok_or_else(|| {
+                let rendered_all = {
+                    let ds = self.state.dataset.as_ref().ok_or_else(|| {
                         Error::runtime("tplot: dataset not loaded", None, Some(span))
                     })?;
 
-                let ts = self.state.working_tree_set().ok_or_else(|| {
-                    Error::runtime("tplot: no trees in working tree set 0", None, Some(span))
-                })?;
+                    let ts = self.state.working_tree_set().ok_or_else(|| {
+                        Error::runtime("tplot: no trees in working tree set 0", None, Some(span))
+                    })?;
 
-                if ts.trees.is_empty() {
-                    return Err(Error::runtime(
-                        "tplot: working tree set is empty",
-                        None,
-                        Some(span),
-                    ));
-                }
+                    if ts.trees.is_empty() {
+                        return Err(Error::runtime(
+                            "tplot: working tree set is empty",
+                            None,
+                            Some(span),
+                        ));
+                    }
 
-                let outgroups = self.state.outgroup.as_ref().map(|og| og.taxa.as_slice());
-                let style = self.state.tree_plot_style;
-                let rendered_all: std::result::Result<Vec<(usize, Vec<String>)>, String> = ts
-                    .trees
-                    .iter()
-                    .enumerate()
-                    .map(|(i, tr)| {
-                        crate::engines::tplot::render_tree(tr, &ds.taxa, outgroups, style)
-                            .map(|lines| (i, lines))
-                    })
-                    .collect();
+                    let outgroups = self.state.outgroup.as_ref().map(|og| og.taxa.as_slice());
+                    let style = self.state.tree_plot_style;
+                    let picked = if trees.is_empty() {
+                        (0..ts.trees.len()).collect::<Vec<_>>()
+                    } else {
+                        expand_tree_selectors("tplot", &trees, ts.trees.len(), span)?
+                    };
 
-                let rendered_all = rendered_all
-                    .map_err(|m| Error::runtime(format!("tplot failed: {m}"), None, Some(span)))?;
+                    let rendered_all: std::result::Result<Vec<(usize, Vec<String>)>, String> =
+                        picked
+                            .into_iter()
+                            .map(|i| {
+                                crate::engines::tplot::render_tree(
+                                    &ts.trees[i],
+                                    &ds.taxa,
+                                    outgroups,
+                                    style,
+                                )
+                                .map(|lines| (i, lines))
+                            })
+                            .collect();
+
+                    rendered_all.map_err(|m| {
+                        Error::runtime(format!("tplot failed: {m}"), None, Some(span))
+                    })?
+                };
 
                 for (i, lines) in rendered_all {
                     self.state.write_line(&format!("TREE {}", i)).map_err(Error::from)?;
@@ -1214,7 +1179,46 @@ impl Vm {
                 }
             }
 
-            Command::TList => {
+            Command::Tsvg { tree, path } => {
+                if let Err(msg) = ensure_tree_context(&self.state) {
+                    return Err(Error::runtime(msg, None, Some(span)));
+                }
+
+                let text = {
+                    let ds = self.state.dataset.as_ref().ok_or_else(|| {
+                        Error::runtime("tsvg: dataset not loaded", None, Some(span))
+                    })?;
+
+                    let ts = self.state.working_tree_set().ok_or_else(|| {
+                        Error::runtime("tsvg: no trees in working tree set 0", None, Some(span))
+                    })?;
+
+                    let picked = expand_tree_selectors("tsvg", &[tree], ts.trees.len(), span)?;
+                    let i = picked[0];
+                    let outgroups = self.state.outgroup.as_ref().map(|og| og.taxa.as_slice());
+                    let style = self.state.tree_plot_style;
+
+                    crate::engines::tplot::render_tree_svg(&ts.trees[i], &ds.taxa, outgroups, style)
+                        .map_err(|m| {
+                            Error::runtime(format!("tsvg failed: {m}"), None, Some(span))
+                        })?
+                };
+
+                let mut f = OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+
+                write!(f, "{text}").map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+
+                self.state
+                    .write_line(&format!("tsvg wrote {}", path.display()))
+                    .map_err(Error::from)?;
+            }
+
+            Command::TList(trees) => {
                 if let Err(msg) = ensure_tree_context(&self.state) {
                     return Err(Error::runtime(msg, None, Some(span)));
                 }
@@ -1223,7 +1227,22 @@ impl Vm {
                     let Some(ts) = self.state.working_tree_set() else {
                         return Err(Error::runtime("tlist no current tree set", None, Some(span)));
                     };
-                    dump_tread_block_from_treeset(&ts.title, &ts.trees)
+
+                    if trees.is_empty() {
+                        dump_tread_block_from_treeset(&ts.title, &ts.trees)
+                    } else {
+                        if ts.trees.is_empty() {
+                            return Err(Error::runtime(
+                                "tlist no trees in working tree set 0",
+                                None,
+                                Some(span),
+                            ));
+                        }
+                        let picked = expand_tree_selectors("tlist", &trees, ts.trees.len(), span)?;
+                        let selected =
+                            picked.into_iter().map(|i| ts.trees[i].clone()).collect::<Vec<_>>();
+                        dump_tread_block_from_treeset(&ts.title, &selected)
+                    }
                 };
 
                 for line in dump.lines() {
@@ -1810,8 +1829,7 @@ fn ensure_tree_context(state: &crate::state::State) -> std::result::Result<(), S
         Ok(())
     }
 }
-/// expands a parsed character selection into zero-based indices and applies a
-/// callback to each selected character.
+/// expands a parsed character selection into zero-based indices.
 
 fn iter_char_sel(
     nchar: usize,
@@ -1848,6 +1866,66 @@ fn iter_char_sel(
         }
     }
     Ok(out)
+}
+/// expands tree selectors into zero-based tree indices, preserving command order
+/// and removing duplicates.
+
+fn expand_tree_selectors(
+    command: &str,
+    items: &[crate::ast::TreeSelector],
+    n: usize,
+    span: Span,
+) -> Result<Vec<usize>> {
+    if n == 0 {
+        return Err(Error::runtime(
+            format!("{command} no trees in working tree set 0"),
+            None,
+            Some(span),
+        ));
+    }
+
+    let mut picked: Vec<usize> = Vec::new();
+
+    for it in items {
+        match *it {
+            crate::ast::TreeSelector::Last => picked.push(n - 1),
+            crate::ast::TreeSelector::Index(i) => {
+                if i >= n {
+                    return Err(Error::runtime(
+                        format!("{command}: index {i} out of range (n={n})"),
+                        None,
+                        Some(span),
+                    ));
+                }
+                picked.push(i);
+            }
+            crate::ast::TreeSelector::RangeInclusive(a, b) => {
+                if a > b {
+                    return Err(Error::runtime(
+                        format!("{command} invalid range (a > b)"),
+                        None,
+                        Some(span),
+                    ));
+                }
+                if b >= n {
+                    return Err(Error::runtime(
+                        format!("{command} range end {b} out of range (n={n})"),
+                        None,
+                        Some(span),
+                    ));
+                }
+                picked.extend(a..=b);
+            }
+        }
+    }
+
+    if picked.is_empty() {
+        return Err(Error::runtime(format!("{command} no trees selected"), None, Some(span)));
+    }
+
+    let mut seen = std::collections::HashSet::<usize>::new();
+    picked.retain(|i| seen.insert(*i));
+    Ok(picked)
 }
 /// parses, validates, and normalizes all tread tree strings against the
 /// current dataset.
