@@ -2,6 +2,8 @@
 implicit enumeration, and Nelson consensus operations for the VM.
 
  */
+/// Apomorphy/homoplasy mapping for annotated SVG output.
+pub mod apo;
 /// Fast TBR branch-swapping (=branch-breaking) search operators.
 pub mod branchswap;
 /// Character-coding configuration (additive, weight, active/inactive).

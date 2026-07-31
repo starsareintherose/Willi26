@@ -2,7 +2,15 @@
 connector styles.
 
  */
-use crate::engines::{trees::Tree, util};
+use std::collections::HashMap;
+
+use crate::engines::{
+    apo::{ApoBranchChange, ApoChangeKind},
+    trees::Tree,
+    util,
+};
+
+type ApoEdgeMap<'a> = HashMap<(usize, usize), Vec<&'a ApoBranchChange>>;
 
 /// Tree plot character style: normal ASCII or extended line-drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +118,193 @@ pub fn render_tree_svg(
     }
     svg.push_str("</g>\n</svg>\n");
     Ok(svg)
+}
+
+/// Renders one tree as SVG with apomorphy/homoplasy markers drawn on horizontal
+/// branches. Black circles are apomorphies and white circles are homoplasies.
+pub fn render_tree_apo_svg(
+    tree: &Tree,
+    taxon_names: &[String],
+    annotations: &[ApoBranchChange],
+) -> Result<String, String> {
+    let mut rooted = tree.clone();
+    util::order_children_for_plot(&mut rooted);
+
+    let mut by_edge = ApoEdgeMap::new();
+    for a in annotations {
+        by_edge.entry((a.parent, a.child)).or_default().push(a);
+    }
+    for changes in by_edge.values_mut() {
+        changes.sort_by_key(|x| x.character);
+    }
+
+    let n = rooted.nodes.len();
+    let leaf_count = rooted.nodes.iter().filter(|x| x.taxon.is_some()).count().max(1);
+    let margin_x = 36.0;
+    let margin_y = 58.0;
+    let root_stem = 21.0;
+    let leaf_gap = 72.0;
+    let branch_base = 72.0;
+    /* Extra branch length per marker; branch_base supplies most marker spacing. */
+    let marker_gap = 6.0;
+    let label_gap = 14.0;
+    let font_size = 14.0;
+    let mark_font_size = 11.0;
+    let radius = 6.0;
+
+    let mut y = vec![0.0; n];
+    let mut next_leaf = 0usize;
+    assign_apo_y(&rooted, rooted.root, margin_y, leaf_gap, &mut next_leaf, &mut y)?;
+
+    let mut x = vec![0.0; n];
+    x[rooted.root] = margin_x + root_stem;
+    assign_apo_x(&rooted, rooted.root, &by_edge, branch_base, marker_gap, &mut x)?;
+
+    let max_label_chars = taxon_names.iter().map(|s| s.chars().count()).max().unwrap_or(1);
+    let max_x = x.iter().copied().fold(margin_x, f64::max);
+    let width = max_x + label_gap + max_label_chars as f64 * 9.0 + margin_x;
+    let height = margin_y * 2.0 + (leaf_count.saturating_sub(1)) as f64 * leaf_gap + 22.0;
+
+    let mut svg = String::new();
+    svg.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{:.0}\" height=\"{:.0}\" viewBox=\"0 0 {:.0} {:.0}\">\n",
+        width, height, width, height
+    ));
+    svg.push_str("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n");
+
+    svg.push_str(
+        "<g fill=\"none\" stroke=\"black\" stroke-width=\"3\" stroke-linecap=\"square\">\n",
+    );
+    svg.push_str(&format!(
+        "<path d=\"M {:.1} {:.1} H {:.1}\"/>\n",
+        margin_x, y[rooted.root], x[rooted.root]
+    ));
+    for (parent, node) in rooted.nodes.iter().enumerate() {
+        if node.children.is_empty() {
+            continue;
+        }
+
+        let ymin = node.children.iter().map(|&c| y[c]).fold(f64::INFINITY, f64::min);
+        let ymax = node.children.iter().map(|&c| y[c]).fold(f64::NEG_INFINITY, f64::max);
+        if ymin.is_finite() && ymax.is_finite() && ymin < ymax {
+            svg.push_str(&format!("<path d=\"M {:.1} {:.1} V {:.1}\"/>\n", x[parent], ymin, ymax));
+        }
+
+        for &child in &node.children {
+            svg.push_str(&format!(
+                "<path d=\"M {:.1} {:.1} H {:.1}\"/>\n",
+                x[parent], y[child], x[child]
+            ));
+        }
+    }
+    svg.push_str("</g>\n");
+
+    svg.push_str(&format!(
+        "<g font-family=\"Arial, DejaVu Sans, sans-serif\" font-size=\"{mark_font_size}\" text-anchor=\"middle\" fill=\"black\">\n"
+    ));
+    for ((parent, child), changes) in &by_edge {
+        if changes.is_empty() {
+            continue;
+        }
+        let start = x[*parent];
+        let end = x[*child];
+        let step = (end - start) / (changes.len() + 1) as f64;
+        for (idx, change) in changes.iter().enumerate() {
+            let cx = start + step * (idx + 1) as f64;
+            let cy = y[*child];
+            svg.push_str(&format!(
+                "<text x=\"{cx:.1}\" y=\"{:.1}\">{}</text>\n",
+                cy - 13.0,
+                change.character
+            ));
+            match change.kind {
+                ApoChangeKind::Apomorphy => {
+                    svg.push_str(&format!(
+                        "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{radius:.1}\" fill=\"black\" stroke=\"black\"/>\n"
+                    ));
+                }
+                ApoChangeKind::Homoplasy => {
+                    svg.push_str(&format!(
+                        "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{radius:.1}\" fill=\"white\" stroke=\"black\" stroke-width=\"2\"/>\n"
+                    ));
+                }
+            }
+            svg.push_str(&format!("<text x=\"{cx:.1}\" y=\"{:.1}\">", cy + 23.0));
+            push_xml_escaped(&mut svg, &change.state);
+            svg.push_str("</text>\n");
+        }
+    }
+    svg.push_str("</g>\n");
+
+    svg.push_str(&format!(
+        "<g font-family=\"Arial, DejaVu Sans, sans-serif\" font-size=\"{font_size}\" font-style=\"italic\" font-weight=\"bold\" fill=\"black\">\n"
+    ));
+    for (node_id, node) in rooted.nodes.iter().enumerate() {
+        let Some(taxon) = node.taxon else {
+            continue;
+        };
+        let label = taxon_names.get(taxon).map(String::as_str).unwrap_or("?");
+        svg.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" dominant-baseline=\"middle\">",
+            x[node_id] + label_gap,
+            y[node_id]
+        ));
+        push_xml_escaped(&mut svg, label);
+        svg.push_str("</text>\n");
+    }
+    svg.push_str("</g>\n</svg>\n");
+    Ok(svg)
+}
+
+/// Assigns y positions from leaf order and places internal nodes midway between
+/// their first and last descendant leaves.
+fn assign_apo_y(
+    tree: &Tree,
+    node: usize,
+    margin_y: f64,
+    leaf_gap: f64,
+    next_leaf: &mut usize,
+    y: &mut [f64],
+) -> Result<f64, String> {
+    if tree.nodes[node].taxon.is_some() {
+        let here = margin_y + *next_leaf as f64 * leaf_gap;
+        *next_leaf += 1;
+        y[node] = here;
+        return Ok(here);
+    }
+
+    if tree.nodes[node].children.is_empty() {
+        return Err(format!("internal node {node} has no children"));
+    }
+
+    let mut sum = 0.0;
+    for &child in &tree.nodes[node].children {
+        sum += assign_apo_y(tree, child, margin_y, leaf_gap, next_leaf, y)?;
+    }
+    let here = sum / tree.nodes[node].children.len() as f64;
+    y[node] = here;
+    Ok(here)
+}
+
+/// Assigns x positions recursively, lengthening only branches that carry
+/// apomorphy/homoplasy markers.
+fn assign_apo_x(
+    tree: &Tree,
+    node: usize,
+    by_edge: &ApoEdgeMap<'_>,
+    branch_base: f64,
+    marker_gap: f64,
+    x: &mut [f64],
+) -> Result<(), String> {
+    for &child in &tree.nodes[node].children {
+        let n_marks = by_edge.get(&(node, child)).map(|x| x.len()).unwrap_or(0);
+        let branch_len =
+            if n_marks == 0 { branch_base } else { branch_base + n_marks as f64 * marker_gap };
+        x[child] = x[node] + branch_len;
+        assign_apo_x(tree, child, by_edge, branch_base, marker_gap, x)?;
+    }
+    Ok(())
 }
 
 /// converts connector characters in a text layout directly into editable SVG

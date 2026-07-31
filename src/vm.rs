@@ -21,11 +21,12 @@ use crate::{
 };
 
 const ASSIST_CMD_LIST: &str = "\
-assist    batch     bb        bytes     ccode     cget      ckeep\n\
-display   erase     files     get       hennig    ie        keep\n\
-log       mhennig   nelsen    outgroup  procedure quote     reroot\n\
-steps     tchoose   tlist     tplot     tread     tsave     tsvg\n\
-txascii   view      watch     xread     xsteps    xx        yama";
+apo       assist    batch     bb        bytes     ccode     cget\n\
+ckeep     display   erase     files     get       hennig    ie\n\
+keep      log       mhennig   nelsen    outgroup  procedure quote\n\
+reroot    steps     tchoose   tlist     tplot     tread     tsave\n\
+tsvg      txascii   view      watch     xread     xsteps    xx\n\
+yama";
 
 /// Command virtual machine: executes parsed commands, manages state, runs
 /// REPL.
@@ -1215,6 +1216,50 @@ impl Vm {
 
                 self.state
                     .write_line(&format!("tsvg wrote {}", path.display()))
+                    .map_err(Error::from)?;
+            }
+
+            Command::Apo { tree, path } => {
+                if let Err(msg) = ensure_tree_context(&self.state) {
+                    return Err(Error::runtime(msg, None, Some(span)));
+                }
+
+                let text = {
+                    let ds = self.state.dataset.as_ref().ok_or_else(|| {
+                        Error::runtime("apo: dataset not loaded", None, Some(span))
+                    })?;
+
+                    let cfg = self.state.char_config.as_ref().ok_or_else(|| {
+                        Error::runtime("apo: ccode/char config not loaded", None, Some(span))
+                    })?;
+
+                    let ts = self.state.working_tree_set().ok_or_else(|| {
+                        Error::runtime("apo: no trees in working tree set 0", None, Some(span))
+                    })?;
+
+                    let picked = expand_tree_selectors("apo", &[tree], ts.trees.len(), span)?;
+                    let i = picked[0];
+                    let annotations =
+                        crate::engines::apo::detect_apomorphic_changes(ds, cfg, &ts.trees[i])
+                            .map_err(|m| {
+                                Error::runtime(format!("apo failed: {m}"), None, Some(span))
+                            })?;
+
+                    crate::engines::tplot::render_tree_apo_svg(&ts.trees[i], &ds.taxa, &annotations)
+                        .map_err(|m| Error::runtime(format!("apo failed: {m}"), None, Some(span)))?
+                };
+
+                let mut f = OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+
+                write!(f, "{text}").map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+
+                self.state
+                    .write_line(&format!("apo wrote {}", path.display()))
                     .map_err(Error::from)?;
             }
 

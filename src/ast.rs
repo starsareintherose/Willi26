@@ -82,6 +82,7 @@ pub enum Command {
     TList(Vec<TreeSelector>),
     TSave(PathBuf),
     Tsvg { tree: TreeSelector, path: PathBuf },
+    Apo { tree: TreeSelector, path: PathBuf },
 
     TChoose(Vec<TreeSelector>),
 

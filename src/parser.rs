@@ -328,6 +328,11 @@ impl Parser {
             let path = self.parse_path_like()?;
             self.expect_semi()?;
             Command::Tsvg { tree, path }
+        } else if eq_ci(name_norm, "apo") {
+            let tree = self.parse_single_tree_selector("apo")?;
+            let path = self.parse_path_like()?;
+            self.expect_semi()?;
+            Command::Apo { tree, path }
         } else if eq_ci(name_norm, "xsteps") {
             /* `xsteps;` defaults to `xsteps l;`. */
             if let Some(tok) = self.peek().cloned() {
@@ -918,9 +923,10 @@ fn normalize_cmd_name(name: &str) -> &str {
     }
     /* (canonical, min_prefix_len) */
     const CMDS: &[(&str, usize)] = &[
+        ("apo", 2),       /* ap... */
         ("assist", 1),    /* a... */
         ("batch", 5),     /* batch */
-        ("bb", 2),        /* bb */
+        ("bb", 1),        /* b */
         ("bytes", 2),     /* by.. */
         ("ccode", 2),     /* cc... */
         ("ckeep", 2),     /* ck... */
