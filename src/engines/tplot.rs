@@ -145,12 +145,12 @@ pub fn render_tree_apo_svg(
     let root_stem = 21.0;
     let leaf_gap = 72.0;
     let branch_base = 72.0;
-    /* Extra branch length per marker; branch_base supplies most marker spacing. */
-    let marker_gap = 6.0;
     let label_gap = 14.0;
     let font_size = 14.0;
     let mark_font_size = 11.0;
     let radius = 6.0;
+    let marker_padding = radius + 10.0;
+    let marker_spacing = radius * 2.0 + 8.0;
 
     let mut y = vec![0.0; n];
     let mut next_leaf = 0usize;
@@ -158,7 +158,15 @@ pub fn render_tree_apo_svg(
 
     let mut x = vec![0.0; n];
     x[rooted.root] = margin_x + root_stem;
-    assign_apo_x(&rooted, rooted.root, &by_edge, branch_base, marker_gap, &mut x)?;
+    assign_apo_x(
+        &rooted,
+        rooted.root,
+        &by_edge,
+        branch_base,
+        marker_padding,
+        marker_spacing,
+        &mut x,
+    )?;
 
     let max_label_chars = taxon_names.iter().map(|s| s.chars().count()).max().unwrap_or(1);
     let max_x = x.iter().copied().fold(margin_x, f64::max);
@@ -208,10 +216,8 @@ pub fn render_tree_apo_svg(
             continue;
         }
         let start = x[*parent];
-        let end = x[*child];
-        let step = (end - start) / (changes.len() + 1) as f64;
         for (idx, change) in changes.iter().enumerate() {
-            let cx = start + step * (idx + 1) as f64;
+            let cx = start + marker_padding + marker_spacing * idx as f64;
             let cy = y[*child];
             svg.push_str(&format!(
                 "<text x=\"{cx:.1}\" y=\"{:.1}\">{}</text>\n",
@@ -330,15 +336,20 @@ fn assign_apo_x(
     node: usize,
     by_edge: &ApoEdgeMap<'_>,
     branch_base: f64,
-    marker_gap: f64,
+    marker_padding: f64,
+    marker_spacing: f64,
     x: &mut [f64],
 ) -> Result<(), String> {
     for &child in &tree.nodes[node].children {
         let n_marks = by_edge.get(&(node, child)).map(|x| x.len()).unwrap_or(0);
-        let branch_len =
-            if n_marks == 0 { branch_base } else { branch_base + n_marks as f64 * marker_gap };
+        let marker_len = if n_marks == 0 {
+            0.0
+        } else {
+            marker_padding * 2.0 + marker_spacing * n_marks.saturating_sub(1) as f64
+        };
+        let branch_len = branch_base.max(marker_len);
         x[child] = x[node] + branch_len;
-        assign_apo_x(tree, child, by_edge, branch_base, marker_gap, x)?;
+        assign_apo_x(tree, child, by_edge, branch_base, marker_padding, marker_spacing, x)?;
     }
     Ok(())
 }
