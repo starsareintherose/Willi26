@@ -35,17 +35,23 @@ pub struct Script {
 pub enum Command {
     /* logging / UI */
     Log(LogCmd),
-    LogToggle { enabled: bool }, /* log*; / log-; */
+    LogToggle {
+        enabled: bool,
+    }, /* log*; / log-; */
     Display(DisplayCmd),
     Quote(String),
     Assist(AssistSel),
 
     /* file & include */
     View(PathBuf),
-    ViewLogToggle { enabled: bool }, /* view*; / view-; */
+    ViewLogToggle {
+        enabled: bool,
+    }, /* view*; / view-; */
     ProcedureOpen(PathBuf),
-    ProcedureClose,                    /* procedure/; */
-    ProcedureToggle { enabled: bool }, /* procedure*; / procedure-; */
+    ProcedureClose, /* procedure/; */
+    ProcedureToggle {
+        enabled: bool,
+    }, /* procedure*; / procedure-; */
 
     /* data */
     XReadQuery,
@@ -61,8 +67,13 @@ pub enum Command {
     CGet(u8),
 
     /* tree search */
-    Hennig { multi: bool, star: bool },
-    Bb { star: bool },
+    Hennig {
+        multi: bool,
+        star: bool,
+    },
+    Bb {
+        star: bool,
+    },
     Nelsen,
 
     Ie,     /* ie; */
@@ -78,11 +89,22 @@ pub enum Command {
     /* reporting / tree info */
     TXAscii(bool),
     TPlot(Vec<TreeSelector>),
-    TRead { title: Option<String>, trees: Vec<String> },
+    TRead {
+        title: Option<String>,
+        trees: Vec<String>,
+    },
     TList(Vec<TreeSelector>),
     TSave(PathBuf),
-    Tsvg { tree: TreeSelector, path: PathBuf },
-    Apo { tree: TreeSelector, path: PathBuf },
+    Tsvg {
+        tree: TreeSelector,
+        path: PathBuf,
+    },
+    /// Show or save a tree annotated with apomorphy/homoplasy changes.
+    Apo {
+        tree: TreeSelector,
+        path: Option<PathBuf>,
+        optimization: ApoOptimization,
+    },
 
     TChoose(Vec<TreeSelector>),
 
@@ -100,7 +122,21 @@ pub enum Command {
 
     Batch(String),
 
-    Unknown { name: String, raw_args: String },
+    Unknown {
+        name: String,
+        raw_args: String,
+    },
+}
+
+/// Apomorphy mapping optimization mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApoOptimization {
+    /// Show only changes whose placement is unambiguous under all optimal reconstructions.
+    Unambiguous,
+    /// Use fast optimization, equivalent to ACCTRAN/accelerated transformation.
+    Fast,
+    /// Use slow optimization, equivalent to DELTRAN/delayed transformation.
+    Slow,
 }
 
 /// Help selection: default display, all commands, or filter by prefix.

@@ -3,6 +3,7 @@
 */
 use std::collections::HashMap;
 
+use crate::ast::ApoOptimization;
 use crate::engines::{
     ccode::CharConfig,
     dataset::{Dataset, StateSet},
@@ -14,17 +15,24 @@ use crate::engines::{
 /// Type of mapped character-state change for SVG apomorphy output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApoChangeKind {
+    /// A unique derived change supporting the child subtree.
     Apomorphy,
+    /// A repeated or conflicting change under the chosen optimization.
     Homoplasy,
 }
 
 /// One character-state change mapped to a directed parent-child branch.
 #[derive(Debug, Clone)]
 pub struct ApoBranchChange {
+    /// Parent node id of the directed branch that receives the marker.
     pub parent: usize,
+    /// Child node id of the directed branch that receives the marker.
     pub child: usize,
+    /// Zero-based character index.
     pub character: usize,
+    /// Display string for the child state reached by this branch change.
     pub state: String,
+    /// Whether the marker is rendered as apomorphy or homoplasy.
     pub kind: ApoChangeKind,
 }
 
@@ -36,6 +44,8 @@ pub fn detect_apomorphic_changes(
     ds: &Dataset,
     cfg: &CharConfig,
     tr: &Tree,
+    optimization: ApoOptimization,
+    root_taxon: Option<usize>,
 ) -> Result<Vec<ApoBranchChange>, String> {
     if cfg.len() != ds.nchar {
         return Err(format!("char_config nchar={} != dataset nchar={}", cfg.len(), ds.nchar));
@@ -53,7 +63,8 @@ pub fn detect_apomorphic_changes(
             continue;
         }
 
-        for change in detect_character_changes(ds, tr, ch, cfg.chars[ch].additive)? {
+        let additive = cfg.chars[ch].additive;
+        for change in detect_character_changes(ds, tr, ch, additive, optimization, root_taxon)? {
             *counts.entry((change.character, change.state_bits)).or_insert(0) += 1;
             raw.push(change);
         }
@@ -89,9 +100,13 @@ pub fn detect_apomorphic_changes(
 
 #[derive(Debug, Clone)]
 struct RawApoChange {
+    /// Parent node id before apomorphy/homoplasy classification.
     parent: usize,
+    /// Child node id before apomorphy/homoplasy classification.
     child: usize,
+    /// Zero-based character index.
     character: usize,
+    /// Concrete child-state bitmask reached by this branch.
     state_bits: u64,
 }
 
@@ -122,8 +137,10 @@ fn descendant_taxon_masks(tr: &Tree, ntax: usize) -> Result<Vec<Vec<bool>>, Stri
     Ok(masks)
 }
 
-/// Returns true when the same state is present in terminal taxa outside the
-/// child subtree, making a unique branch change homoplasious.
+/// Returns true when the same state is fixed in terminal taxa outside the child
+/// subtree, making a unique branch change homoplasious. Polymorphic terminals
+/// such as [0 3] do not create their own marker in Winclada and should not turn
+/// a single fixed 0->3 change elsewhere into homoplasy.
 fn state_exists_outside_subtree(
     ds: &Dataset,
     subtree: &[bool],
@@ -134,8 +151,8 @@ fn state_exists_outside_subtree(
         if in_subtree {
             continue;
         }
-        let bits = dataset_state_at(ds, taxon, ch)?.bits();
-        if bits != StateSet::ALL36.bits() && bits & state_bits != 0 {
+        let state = dataset_state_at(ds, taxon, ch)?;
+        if state.is_singleton() && state.bits() == state_bits {
             return Ok(true);
         }
     }
@@ -149,6 +166,8 @@ fn detect_character_changes(
     tr: &Tree,
     ch: usize,
     additive: bool,
+    optimization: ApoOptimization,
+    root_taxon: Option<usize>,
 ) -> Result<Vec<RawApoChange>, String> {
     let n_nodes = tr.nodes.len();
     let mut down = vec![INF; n_nodes * NSTATES];
@@ -244,6 +263,23 @@ fn detect_character_changes(
         }
     }
 
+    if optimization != ApoOptimization::Unambiguous {
+        let root_preference = match root_taxon {
+            Some(taxon) if taxon < ds.ntax => {
+                Some(normalize_sankoff_leaf_bits(dataset_state_at(ds, taxon, ch)?.bits()))
+            }
+            _ => None,
+        };
+        final_bits = resolve_ambiguous_states(
+            tr,
+            &down,
+            final_bits,
+            additive,
+            optimization,
+            root_preference,
+        );
+    }
+
     let mut out = Vec::new();
     for (parent, child) in tr.rooted_edges() {
         let parent_bits = final_bits[parent];
@@ -255,6 +291,127 @@ fn detect_character_changes(
     }
 
     Ok(out)
+}
+
+/// Resolves globally optimal state sets for ACCTRAN/DELTRAN display without
+/// changing tree length. Fast optimization prefers locally cheaper subtree
+/// states, placing changes earlier; slow optimization inherits the parent state
+/// whenever possible, delaying changes.
+fn resolve_ambiguous_states(
+    tr: &Tree,
+    down: &[u64],
+    mut bits: Vec<u64>,
+    additive: bool,
+    optimization: ApoOptimization,
+    root_preference: Option<u64>,
+) -> Vec<u64> {
+    let root_bits = bits[tr.root];
+    if root_bits.count_ones() > 1 {
+        let preferred =
+            root_preference.map(|p| p & root_bits).filter(|&p| p != 0).unwrap_or(root_bits);
+        bits[tr.root] = choose_root_state(preferred, down, tr.root);
+    }
+
+    let mut preorder = Vec::with_capacity(tr.nodes.len());
+    preorder_fill(tr, tr.root, &mut preorder);
+    for parent in preorder {
+        let parent_bits = bits[parent];
+        if parent_bits.count_ones() != 1 {
+            continue;
+        }
+        let parent_state = parent_bits.trailing_zeros() as usize;
+
+        for &child in &tr.nodes[parent].children {
+            if bits[child].count_ones() <= 1 {
+                continue;
+            }
+
+            let mut candidates = 0u64;
+            let best_child_cost = sankoff_min_child_cost(down, child, parent_state, additive);
+            let child_base = child * NSTATES;
+            for state in 0..NSTATES {
+                let bit = 1u64 << state;
+                if bits[child] & bit == 0 {
+                    continue;
+                }
+                let cost = add_cost(
+                    down[child_base + state],
+                    sankoff_transition_cost(parent_state, state, additive),
+                );
+                if cost == best_child_cost {
+                    candidates |= bit;
+                }
+            }
+
+            if candidates == 0 {
+                candidates = bits[child];
+            }
+            bits[child] = choose_child_state(candidates, down, child, parent_state, optimization);
+        }
+    }
+
+    bits
+}
+
+/// Picks the displayed root state from equally optimal root candidates.
+fn choose_root_state(candidates: u64, down: &[u64], node: usize) -> u64 {
+    choose_min_down_state(candidates, down, node, None)
+}
+
+/// Picks an ACCTRAN/DELTRAN child state from the states compatible with the
+/// parent state and global optimal tree length.
+fn choose_child_state(
+    candidates: u64,
+    down: &[u64],
+    node: usize,
+    parent_state: usize,
+    optimization: ApoOptimization,
+) -> u64 {
+    let parent_bit = 1u64 << parent_state;
+    if optimization == ApoOptimization::Slow && candidates & parent_bit != 0 {
+        return parent_bit;
+    }
+
+    choose_min_down_state(candidates, down, node, Some(parent_bit))
+}
+
+/// Selects one singleton state among candidates using subtree cost, with an
+/// optional tie preference used to keep DELTRAN changes as late as possible.
+fn choose_min_down_state(
+    candidates: u64,
+    down: &[u64],
+    node: usize,
+    tie_preference: Option<u64>,
+) -> u64 {
+    let base = node * NSTATES;
+    let mut best = INF;
+    let mut best_bits = 0u64;
+    for state in 0..NSTATES {
+        let bit = 1u64 << state;
+        if candidates & bit == 0 {
+            continue;
+        }
+        let cost = down[base + state];
+        if cost < best {
+            best = cost;
+            best_bits = bit;
+        } else if cost == best {
+            best_bits |= bit;
+        }
+    }
+
+    if let Some(preferred) = tie_preference {
+        if best_bits & preferred != 0 {
+            return preferred;
+        }
+    }
+
+    if best_bits == 0 { lowest_state_bit(candidates) } else { lowest_state_bit(best_bits) }
+}
+
+/// Returns the lowest set state bit from a non-empty state mask.
+fn lowest_state_bit(bits: u64) -> u64 {
+    bits & bits.wrapping_neg()
 }
 
 /// Decides whether optimized endpoint state sets are specific enough to draw a
@@ -327,6 +484,14 @@ fn postorder_fill(tr: &Tree, v: usize, out: &mut Vec<usize>) {
         postorder_fill(tr, child, out);
     }
     out.push(v);
+}
+
+/// Collects node ids in preorder for top-down ACCTRAN/DELTRAN resolution.
+fn preorder_fill(tr: &Tree, v: usize, out: &mut Vec<usize>) {
+    out.push(v);
+    for &child in &tr.nodes[v].children {
+        preorder_fill(tr, child, out);
+    }
 }
 
 /// Formats a low-36-bit state set as Hennig/TNT-style state symbols.

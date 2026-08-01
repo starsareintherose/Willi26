@@ -43,6 +43,13 @@ impl StateSet {
     pub fn is_empty(&self) -> bool {
         self.bits == 0
     }
+
+    /// reports whether this is one fixed concrete state. Missing/unknown and
+    /// polymorphic state sets are not fixed singleton states.
+    pub fn is_singleton(&self) -> bool {
+        self.bits.count_ones() == 1
+    }
+
     /// exposes the raw low-36-bit representation used by scoring.
 
     pub fn bits(&self) -> u64 {

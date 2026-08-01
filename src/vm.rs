@@ -28,6 +28,14 @@ reroot    steps     tchoose   tlist     tplot     tread     tsave\n\
 tsvg      txascii   view      watch     xread     xsteps    xx\n\
 yama";
 
+/// Rendered result for an `apo` command before it is written or printed.
+enum ApoOutput {
+    /// Complete SVG document used when the command supplied an output path.
+    Svg(String),
+    /// Terminal text-tree lines used when the command has no output path.
+    Text(Vec<String>),
+}
+
 /// Command virtual machine: executes parsed commands, manages state, runs
 /// REPL.
 pub struct Vm {
@@ -1219,12 +1227,12 @@ impl Vm {
                     .map_err(Error::from)?;
             }
 
-            Command::Apo { tree, path } => {
+            Command::Apo { tree, path, optimization } => {
                 if let Err(msg) = ensure_tree_context(&self.state) {
                     return Err(Error::runtime(msg, None, Some(span)));
                 }
 
-                let text = {
+                let output = {
                     let ds = self.state.dataset.as_ref().ok_or_else(|| {
                         Error::runtime("apo: dataset not loaded", None, Some(span))
                     })?;
@@ -1239,28 +1247,63 @@ impl Vm {
 
                     let picked = expand_tree_selectors("apo", &[tree], ts.trees.len(), span)?;
                     let i = picked[0];
-                    let annotations =
-                        crate::engines::apo::detect_apomorphic_changes(ds, cfg, &ts.trees[i])
-                            .map_err(|m| {
-                                Error::runtime(format!("apo failed: {m}"), None, Some(span))
-                            })?;
+                    let root_taxon = self.state.outgroup.as_ref().and_then(|og| og.first());
+                    let annotations = crate::engines::apo::detect_apomorphic_changes(
+                        ds,
+                        cfg,
+                        &ts.trees[i],
+                        optimization,
+                        root_taxon,
+                    )
+                    .map_err(|m| Error::runtime(format!("apo failed: {m}"), None, Some(span)))?;
 
-                    crate::engines::tplot::render_tree_apo_svg(&ts.trees[i], &ds.taxa, &annotations)
-                        .map_err(|m| Error::runtime(format!("apo failed: {m}"), None, Some(span)))?
+                    match &path {
+                        Some(_) => crate::engines::tplot::render_tree_apo_svg(
+                            &ts.trees[i],
+                            &ds.taxa,
+                            &annotations,
+                        )
+                        .map(ApoOutput::Svg)
+                        .map_err(|m| {
+                            Error::runtime(format!("apo failed: {m}"), None, Some(span))
+                        })?,
+                        None => crate::engines::tplot::render_tree_apo_text(
+                            &ts.trees[i],
+                            &ds.taxa,
+                            &annotations,
+                            self.state.tree_plot_style,
+                        )
+                        .map(ApoOutput::Text)
+                        .map_err(|m| {
+                            Error::runtime(format!("apo failed: {m}"), None, Some(span))
+                        })?,
+                    }
                 };
 
-                let mut f = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&path)
-                    .map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+                match (path, output) {
+                    (Some(path), ApoOutput::Svg(text)) => {
+                        let mut f = OpenOptions::new()
+                            .create(true)
+                            .truncate(true)
+                            .write(true)
+                            .open(&path)
+                            .map_err(|e| Error::io(e, Some(path.display().to_string())))?;
 
-                write!(f, "{text}").map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+                        write!(f, "{text}")
+                            .map_err(|e| Error::io(e, Some(path.display().to_string())))?;
 
-                self.state
-                    .write_line(&format!("apo wrote {}", path.display()))
-                    .map_err(Error::from)?;
+                        self.state
+                            .write_line(&format!("apo wrote {}", path.display()))
+                            .map_err(Error::from)?;
+                    }
+                    (None, ApoOutput::Text(lines)) => {
+                        self.state.write_line("apo").map_err(Error::from)?;
+                        for line in lines {
+                            self.state.write_line(&line).map_err(Error::from)?;
+                        }
+                    }
+                    _ => unreachable!("apo output kind follows path presence"),
+                }
             }
 
             Command::TList(trees) => {

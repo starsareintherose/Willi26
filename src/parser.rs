@@ -329,10 +329,21 @@ impl Parser {
             self.expect_semi()?;
             Command::Tsvg { tree, path }
         } else if eq_ci(name_norm, "apo") {
+            let optimization = if self.try_consume_discriminant(TokenKind::Plus) {
+                ApoOptimization::Fast
+            } else if self.try_consume_discriminant(TokenKind::Minus) {
+                ApoOptimization::Slow
+            } else {
+                ApoOptimization::Unambiguous
+            };
             let tree = self.parse_single_tree_selector("apo")?;
-            let path = self.parse_path_like()?;
+            let path = if self.peek().map(|t| t.kind == TokenKind::Semi).unwrap_or(false) {
+                None
+            } else {
+                Some(self.parse_path_like()?)
+            };
             self.expect_semi()?;
-            Command::Apo { tree, path }
+            Command::Apo { tree, path, optimization }
         } else if eq_ci(name_norm, "xsteps") {
             /* `xsteps;` defaults to `xsteps l;`. */
             if let Some(tok) = self.peek().cloned() {

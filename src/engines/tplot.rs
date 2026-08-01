@@ -257,6 +257,42 @@ pub fn render_tree_apo_svg(
     Ok(svg)
 }
 
+/// Renders one tree as terminal text with apomorphy/homoplasy character numbers
+/// inserted on the horizontal branches that carry those changes.
+pub fn render_tree_apo_text(
+    tree: &Tree,
+    taxon_names: &[String],
+    annotations: &[ApoBranchChange],
+    style: TPlotStyle,
+) -> Result<Vec<String>, String> {
+    let mut rooted = tree.clone();
+    util::order_children_for_plot(&mut rooted);
+
+    let mut by_edge = ApoEdgeMap::new();
+    for a in annotations {
+        by_edge.entry((a.parent, a.child)).or_default().push(a);
+    }
+    for changes in by_edge.values_mut() {
+        changes.sort_by_key(|x| x.character);
+    }
+
+    let layout = ApoTextLayout::build(&rooted, rooted.root, taxon_names, &by_edge)?;
+    let width = layout.width();
+    let mut out = Vec::with_capacity(layout.lines.len());
+    for row in &layout.lines {
+        let mut line = String::with_capacity(width);
+        for cell in row {
+            line.push(*cell);
+        }
+        while line.ends_with(' ') {
+            line.pop();
+        }
+        out.push(line);
+    }
+
+    Ok(util::apply_charset(out, style == TPlotStyle::Unicode))
+}
+
 /// Assigns y positions from leaf order and places internal nodes midway between
 /// their first and last descendant leaves.
 fn assign_apo_y(
@@ -590,4 +626,137 @@ impl Layout {
     fn width(&self) -> usize {
         self.lines.iter().map(|x| x.len()).max().unwrap_or(0)
     }
+}
+
+#[derive(Debug, Clone)]
+struct ApoTextLayout {
+    /// Character-grid rows containing connectors, branch labels, and taxon names.
+    lines: Vec<Vec<char>>,
+    /// Row where the parent branch attaches to this subtree block.
+    anchor_row: usize,
+}
+
+impl ApoTextLayout {
+    /// Recursively lays out a subtree while inserting comma-separated character
+    /// numbers into the branch segment leading to each child.
+    fn build(
+        tree: &Tree,
+        node: usize,
+        taxon_names: &[String],
+        by_edge: &ApoEdgeMap<'_>,
+    ) -> Result<Self, String> {
+        let n = &tree.nodes[node];
+
+        if let Some(t) = n.taxon {
+            let label = taxon_names.get(t).cloned().unwrap_or_else(|| format!("{t}"));
+            return Ok(Self { lines: vec![label.chars().collect()], anchor_row: 0 });
+        }
+
+        if n.children.is_empty() {
+            return Ok(Self { lines: vec![format!("#{node}").chars().collect()], anchor_row: 0 });
+        }
+
+        let mut child_blocks = Vec::with_capacity(n.children.len());
+        let mut branch_labels = Vec::with_capacity(n.children.len());
+        for &child in &n.children {
+            child_blocks.push(Self::build(tree, child, taxon_names, by_edge)?);
+            branch_labels.push(format_apo_branch_label(by_edge.get(&(node, child))));
+        }
+
+        let gap = 1usize;
+        let mut total_rows = 0usize;
+        let mut child_anchor_rows = Vec::with_capacity(child_blocks.len());
+        for (i, block) in child_blocks.iter().enumerate() {
+            if i > 0 {
+                total_rows += gap;
+            }
+            child_anchor_rows.push(total_rows + block.anchor_row);
+            total_rows += block.lines.len();
+        }
+
+        let anchor_row = match (child_anchor_rows.first(), child_anchor_rows.last()) {
+            (Some(&a), Some(&b)) => (a + b) / 2,
+            _ => 0,
+        };
+
+        let branch_width = branch_labels.iter().map(|s| s.chars().count()).max().unwrap_or(2);
+        let child_width = child_blocks.iter().map(|b| b.width()).max().unwrap_or(0);
+        let left_width = 1 + branch_width;
+        let total_width = left_width + child_width;
+        let mut lines = vec![vec![' '; total_width]; total_rows];
+
+        for (block_idx, block) in child_blocks.iter().enumerate() {
+            let top =
+                if block_idx == 0 { 0 } else { child_anchor_rows[block_idx] - block.anchor_row };
+
+            for (r, src_line) in block.lines.iter().enumerate() {
+                let dst_r = top + r;
+                for (c, ch) in src_line.iter().enumerate() {
+                    lines[dst_r][left_width + c] = *ch;
+                }
+            }
+        }
+
+        if let (Some(&min_r), Some(&max_r)) = (child_anchor_rows.first(), child_anchor_rows.last())
+        {
+            for r in min_r..=max_r {
+                if r != anchor_row && !child_anchor_rows.contains(&r) {
+                    lines[r][0] = '│';
+                }
+            }
+            if lines[anchor_row][0] == ' ' {
+                lines[anchor_row][0] = '│';
+            }
+        }
+
+        for (idx, &r) in child_anchor_rows.iter().enumerate() {
+            lines[r][0] = if idx == 0 {
+                '┌'
+            } else if idx + 1 == child_anchor_rows.len() {
+                '└'
+            } else {
+                '├'
+            };
+
+            let branch = pad_branch_label(&branch_labels[idx], branch_width);
+            for (c, ch) in branch.chars().enumerate() {
+                lines[r][1 + c] = ch;
+            }
+        }
+
+        Ok(Self { lines, anchor_row })
+    }
+
+    /// Returns the maximum row width for output buffer sizing.
+    fn width(&self) -> usize {
+        self.lines.iter().map(|x| x.len()).max().unwrap_or(0)
+    }
+}
+
+/// Formats all apomorphy/homoplasy character numbers assigned to one branch as
+/// a horizontal connector label, or a plain connector for unannotated branches.
+fn format_apo_branch_label(changes: Option<&Vec<&ApoBranchChange>>) -> String {
+    let Some(changes) = changes else {
+        return "──".to_string();
+    };
+
+    if changes.is_empty() {
+        return "──".to_string();
+    }
+
+    let labels = changes.iter().map(|x| x.character.to_string()).collect::<Vec<_>>().join(",");
+    format!("─{labels}─")
+}
+
+/// Pads a branch label with horizontal connector characters so sibling branches
+/// align to the same subtree start column.
+fn pad_branch_label(label: &str, width: usize) -> String {
+    let len = label.chars().count();
+    if len >= width {
+        return label.to_string();
+    }
+
+    let mut out = label.to_string();
+    out.extend(std::iter::repeat_n('─', width - len));
+    out
 }

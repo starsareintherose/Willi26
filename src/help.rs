@@ -28,9 +28,12 @@ pub fn find_topics_by_prefix(prefix: &str) -> Vec<&'static HelpTopic> {
 static TOPICS: &[HelpTopic] = &[
     HelpTopic {
         name: "apo",
-        summary: "save SVG tree with apomorphy/homoplasy markers",
+        summary: "show or save tree with apomorphy/homoplasy markers",
         details: &[
+            "apo n;           show tree n with apomorphy/homoplasy character labels",
             "apo n f;         save tree n as SVG file f with apomorphy/homoplasy markers",
+            "apo+;            same with apo, but fast optimization / ACCTRAN",
+            "apo-;            same with apo, slow optimization / DELTRAN",
             "                 black dots are apomorphies; white dots are homoplasies",
             "                 if n is /, last tree is chosen",
         ],
