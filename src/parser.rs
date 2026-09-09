@@ -67,6 +67,13 @@ impl Parser {
             _ => return Err(self.err_parse("expected command identifier", Some(tok.span))),
         };
         self.bump();
+
+        if let Some(index) = compact_tplot_index(&name) {
+            self.expect_semi()?;
+            let span = Span::new(start, self.last_end());
+            return Ok(Spanned::new(Command::TPlot(vec![TreeSelector::Index(index)]), span));
+        }
+
         /* alias name */
         let name_norm = normalize_cmd_name(&name);
 
@@ -239,6 +246,17 @@ impl Parser {
         } else if eq_ci(name_norm, "nelsen") {
             self.expect_semi()?;
             Command::Nelsen
+        } else if eq_ci(name_norm, "naked") {
+            if self.try_consume_discriminant(TokenKind::Eq) {
+                self.expect_semi()?;
+                Command::NakedSet { show_node_labels: false }
+            } else if self.try_consume_discriminant(TokenKind::Minus) {
+                self.expect_semi()?;
+                Command::NakedSet { show_node_labels: true }
+            } else {
+                self.expect_semi()?;
+                Command::NakedQuery
+            }
         } else if eq_ci(name_norm, "ie") {
             let cmd = if self.try_consume_discriminant(TokenKind::Star) {
                 Command::IeStar /* ie*; */
@@ -328,6 +346,130 @@ impl Parser {
             let path = self.parse_path_like()?;
             self.expect_semi()?;
             Command::Tsvg { tree, path }
+        } else if eq_ci(name_norm, "ttags") {
+            if self.try_consume_discriminant(TokenKind::Eq) {
+                self.expect_semi()?;
+                Command::TTags(TTagsCmd::Enable)
+            } else if self.try_consume_discriminant(TokenKind::Minus) {
+                self.expect_semi()?;
+                Command::TTags(TTagsCmd::Clear)
+            } else if self.try_consume_discriminant(TokenKind::Amp) {
+                let path = self.parse_path_like()?;
+                self.expect_semi()?;
+                Command::TTags(TTagsCmd::WriteSvg(path))
+            } else if self.try_consume_discriminant(TokenKind::Plus) {
+                let node = self.parse_usize()?;
+                let label = self.collect_tokens_as_string_until_semi()?.trim().to_string();
+                if label.is_empty() {
+                    return Err(self.err_parse("ttags +N requires label text", None));
+                }
+                Command::TTags(TTagsCmd::SetLabel { node, label })
+            } else {
+                self.expect_semi()?;
+                Command::TTags(TTagsCmd::Query)
+            }
+        } else if eq_ci(name_norm, "resample") {
+            let method = self
+                .peek()
+                .cloned()
+                .ok_or_else(|| self.err_parse("expected resample method", None))?;
+            let method_name = match method.kind {
+                TokenKind::Ident(s) => {
+                    self.bump();
+                    s
+                }
+                _ => return Err(self.err_parse("expected resample method", Some(method.span))),
+            };
+            let is_boot = method_name.eq_ignore_ascii_case("boot");
+            let is_jak = method_name.eq_ignore_ascii_case("jak")
+                || method_name.eq_ignore_ascii_case("jack")
+                || method_name.eq_ignore_ascii_case("jackknife");
+            let is_sym = method_name.eq_ignore_ascii_case("sym")
+                || method_name.eq_ignore_ascii_case("symmetric");
+            if !is_boot && !is_jak && !is_sym {
+                return Err(self.err_parse(
+                    format!("unsupported resample method: {method_name}"),
+                    Some(method.span),
+                ));
+            }
+            let replications = self.parse_usize()?;
+            if replications == 0 {
+                return Err(self.err_parse("resample requires replications > 0", None));
+            }
+
+            let mut tree = TreeSelector::Last;
+            let mut delete_percent = if is_jak {
+                36.8
+            } else if is_sym {
+                33.0
+            } else {
+                0.0
+            };
+            let mut search = Vec::new();
+
+            while !self.peek().map(|t| t.kind == TokenKind::Semi).unwrap_or(true) {
+                let tok = self
+                    .peek()
+                    .cloned()
+                    .ok_or_else(|| self.err_parse("expected resample option or ';'", None))?;
+                match tok.kind {
+                    TokenKind::Ident(s) if s.eq_ignore_ascii_case("from") => {
+                        self.bump();
+                        tree = self.parse_single_tree_selector("resample from")?;
+                    }
+                    TokenKind::Ident(s) if s.eq_ignore_ascii_case("delete") => {
+                        if is_boot {
+                            return Err(self.err_parse(
+                                "resample boot does not accept delete; use jak or sym",
+                                Some(tok.span),
+                            ));
+                        }
+                        self.bump();
+                        delete_percent = self.parse_percent_number("resample delete")?;
+                    }
+                    TokenKind::LBracket => {
+                        search = self.parse_resample_search_steps()?;
+                    }
+                    _ => {
+                        return Err(self.err_parse(
+                            "expected resample option: from, delete, [search], or ';'",
+                            Some(tok.span),
+                        ));
+                    }
+                }
+            }
+            self.expect_semi()?;
+            if search.is_empty() {
+                search = vec![
+                    ResampleSearchStep::MHennig { star: false },
+                    ResampleSearchStep::Bb { star: false },
+                ];
+            }
+            if is_sym && delete_percent > 50.0 {
+                return Err(self.err_parse(
+                    "resample sym delete percentage must be <= 50 because up and down use the same probability",
+                    None,
+                ));
+            }
+            if is_boot {
+                Command::Resample(ResampleCmd::Boot { replications, tree, search })
+            } else {
+                if is_jak {
+                    Command::Resample(ResampleCmd::Jak {
+                        replications,
+                        tree,
+                        delete_percent,
+                        search,
+                    })
+                } else {
+                    Command::Resample(ResampleCmd::Sym {
+                        replications,
+                        tree,
+                        delete_percent,
+                        search,
+                    })
+                }
+            }
         } else if eq_ci(name_norm, "apo") {
             let optimization = if self.try_consume_discriminant(TokenKind::Plus) {
                 ApoOptimization::Fast
@@ -523,6 +665,103 @@ impl Parser {
                 Some(tok.span),
             )),
         }
+    }
+
+    /// parses a decimal percentage, accepting `37` or `36.8`.
+    fn parse_percent_number(&mut self, label: &str) -> Result<f64> {
+        let first = self
+            .peek()
+            .cloned()
+            .ok_or_else(|| self.err_parse(format!("expected {label} percentage"), None))?;
+        let TokenKind::Number(mut text) = first.kind else {
+            return Err(self.err_parse(format!("expected {label} percentage"), Some(first.span)));
+        };
+        self.bump();
+
+        if self.try_consume_discriminant(TokenKind::Dot) {
+            let frac = self.peek().cloned().ok_or_else(|| {
+                self.err_parse(format!("expected digits after {label} decimal"), None)
+            })?;
+            let TokenKind::Number(frac_text) = frac.kind else {
+                return Err(self
+                    .err_parse(format!("expected digits after {label} decimal"), Some(frac.span)));
+            };
+            self.bump();
+            text.push('.');
+            text.push_str(&frac_text);
+        }
+
+        let value = text
+            .parse::<f64>()
+            .map_err(|_| self.err_parse(format!("invalid {label} percentage"), Some(first.span)))?;
+        if !(0.0..=100.0).contains(&value) {
+            return Err(self.err_parse(
+                format!("{label} percentage must be between 0 and 100"),
+                Some(first.span),
+            ));
+        }
+        Ok(value)
+    }
+
+    /// parses `[mh*; bb*;]` style resampling search steps.
+    fn parse_resample_search_steps(&mut self) -> Result<Vec<ResampleSearchStep>> {
+        self.expect_discriminant(TokenKind::LBracket)?;
+        let mut steps = Vec::new();
+
+        loop {
+            let tok = self
+                .peek()
+                .cloned()
+                .ok_or_else(|| self.err_parse("unterminated resample search list", None))?;
+            match tok.kind {
+                TokenKind::RBracket => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Semi => {
+                    self.bump();
+                }
+                TokenKind::Ident(s) => {
+                    self.bump();
+                    let star = self.try_consume_discriminant(TokenKind::Star);
+                    let dash = if s.eq_ignore_ascii_case("ie") {
+                        self.try_consume_discriminant(TokenKind::Minus)
+                    } else {
+                        false
+                    };
+                    if star && dash {
+                        return Err(self.err_parse(
+                            "resample ie search step accepts only one of '*' or '-'",
+                            Some(tok.span),
+                        ));
+                    }
+                    let step = if s.eq_ignore_ascii_case("h") || s.eq_ignore_ascii_case("hennig") {
+                        ResampleSearchStep::Hennig { star }
+                    } else if s.eq_ignore_ascii_case("mh") || s.eq_ignore_ascii_case("mhennig") {
+                        ResampleSearchStep::MHennig { star }
+                    } else if s.eq_ignore_ascii_case("bb") {
+                        ResampleSearchStep::Bb { star }
+                    } else if s.eq_ignore_ascii_case("ie") {
+                        ResampleSearchStep::Ie { star, dash }
+                    } else {
+                        return Err(self.err_parse(
+                            format!("unsupported resample search step: {s}"),
+                            Some(tok.span),
+                        ));
+                    };
+                    steps.push(step);
+                }
+                _ => {
+                    return Err(self
+                        .err_parse("expected resample search step, ';', or ']'", Some(tok.span)));
+                }
+            }
+        }
+
+        if steps.is_empty() {
+            return Err(self.err_parse("resample search list cannot be empty", None));
+        }
+        Ok(steps)
     }
     /// parses one or more tree selectors for commands where a non-empty selector
     /// list is required.
@@ -867,6 +1106,7 @@ fn token_to_string(tok: &Token) -> String {
         TokenKind::Eq => "=".to_string(),
         TokenKind::Slash => "/".to_string(),
         TokenKind::Star => "*".to_string(),
+        TokenKind::Amp => "&".to_string(),
         TokenKind::Plus => "+".to_string(),
         TokenKind::Minus => "-".to_string(),
         TokenKind::Dot => ".".to_string(),
@@ -877,6 +1117,16 @@ fn token_to_string(tok: &Token) -> String {
         TokenKind::Comma => ",".to_string(),
         TokenKind::Question => "?".to_string(),
     }
+}
+
+/// accepts compact legacy tplot selectors such as `tp1;` as `tplot 1;`.
+fn compact_tplot_index(name: &str) -> Option<usize> {
+    let lower = name.to_ascii_lowercase();
+    let rest = lower.strip_prefix("tplot").or_else(|| lower.strip_prefix("tp"))?;
+    if rest.is_empty() || !rest.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse::<usize>().ok()
 }
 /// splits raw tread text into individual parenthetical tree strings separated
 /// by `*`.
@@ -951,11 +1201,13 @@ fn normalize_cmd_name(name: &str) -> &str {
         ("keep", 1),      /* k... */
         ("log", 1),       /* l... */
         ("mhennig", 1),   /* m... */
+        ("naked", 4),     /* nake... */
         ("nelsen", 1),    /* n... */
         ("outgroup", 1),  /* o... */
         ("procedure", 1), /* p... */
         ("quote", 1),     /* q... */
         ("reroot", 1),    /* r... */
+        ("resample", 3),  /* res... */
         ("steps", 1),     /* s... */
         ("tchoose", 2),   /* tc... */
         ("tlist", 2),     /* tl... */
@@ -963,6 +1215,7 @@ fn normalize_cmd_name(name: &str) -> &str {
         ("tread", 2),     /* tr... */
         ("tsave", 2),     /* ts... */
         ("tsvg", 3),      /* tsv... */
+        ("ttags", 2),     /* tt... */
         ("txascii", 2),   /* tx... */
         ("view", 1),      /* v... */
         ("watch", 1),     /* w... */

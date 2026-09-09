@@ -74,6 +74,10 @@ pub struct State {
     pub tree_slots: HashMap<u8, crate::engines::trees::TreeSet>,
 
     pub tree_plot_style: TPlotStyle,
+    pub show_tree_node_labels: bool,
+    pub ttags_enabled: bool,
+    pub ttags_target_tree: Option<crate::engines::trees::Tree>,
+    pub ttags_labels: HashMap<usize, String>,
 
     pub log_path: Option<std::path::PathBuf>,
     pub log_enabled: bool,
@@ -103,6 +107,10 @@ impl State {
             current_tree_slot: None,
             tree_slots: HashMap::new(),
             tree_plot_style: TPlotStyle::Unicode,
+            show_tree_node_labels: false,
+            ttags_enabled: false,
+            ttags_target_tree: None,
+            ttags_labels: HashMap::new(),
             watch_enabled: false,
         }
     }
@@ -200,6 +208,8 @@ impl State {
     pub fn clear_all_trees(&mut self) {
         self.current_tree_slot = None;
         self.tree_slots.clear();
+        self.ttags_target_tree = None;
+        self.ttags_labels.clear();
     }
     /// appends trees to whichever internal slot is current, creating slot 0 when
     /// none exists.

@@ -99,6 +99,12 @@ pub enum Command {
         tree: TreeSelector,
         path: PathBuf,
     },
+    NakedQuery,
+    NakedSet {
+        show_node_labels: bool,
+    },
+    TTags(TTagsCmd),
+    Resample(ResampleCmd),
     /// Show or save a tree annotated with apomorphy/homoplasy changes.
     Apo {
         tree: TreeSelector,
@@ -126,6 +132,47 @@ pub enum Command {
         name: String,
         raw_args: String,
     },
+}
+
+/// Resampling commands for measuring group support on the current target tree.
+#[derive(Debug, Clone)]
+pub enum ResampleCmd {
+    Boot {
+        replications: usize,
+        tree: TreeSelector,
+        search: Vec<ResampleSearchStep>,
+    },
+    Jak {
+        replications: usize,
+        tree: TreeSelector,
+        delete_percent: f64,
+        search: Vec<ResampleSearchStep>,
+    },
+    Sym {
+        replications: usize,
+        tree: TreeSelector,
+        delete_percent: f64,
+        search: Vec<ResampleSearchStep>,
+    },
+}
+
+/// Search steps used inside one resampling replicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResampleSearchStep {
+    Hennig { star: bool },
+    MHennig { star: bool },
+    Bb { star: bool },
+    Ie { star: bool, dash: bool },
+}
+
+/// Tree-node label storage and export commands.
+#[derive(Debug, Clone)]
+pub enum TTagsCmd {
+    Query,
+    Enable,
+    Clear,
+    WriteSvg(PathBuf),
+    SetLabel { node: usize, label: String },
 }
 
 /// Apomorphy mapping optimization mode.

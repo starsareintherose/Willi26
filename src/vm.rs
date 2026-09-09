@@ -4,6 +4,7 @@ formats command output.
 
  */
 use std::{
+    collections::HashMap,
     fs::OpenOptions,
     io::{self, Write},
     path::Path,
@@ -23,9 +24,10 @@ use crate::{
 const ASSIST_CMD_LIST: &str = "\
 apo       assist    batch     bb        bytes     ccode     cget\n\
 ckeep     display   erase     files     get       hennig    ie\n\
-keep      log       mhennig   nelsen    outgroup  procedure quote\n\
-reroot    steps     tchoose   tlist     tplot     tread     tsave\n\
-tsvg      txascii   view      watch     xread     xsteps    xx\n\
+keep      log       mhennig   naked     nelsen    outgroup  procedure\n\
+quote     reroot    resample  steps     tchoose   tlist     tplot\n\
+tread     tsave     tsvg      ttags     txascii   view      watch\n\
+xread     xsteps    xx\n\
 yama";
 
 /// Rendered result for an `apo` command before it is written or printed.
@@ -940,6 +942,17 @@ impl Vm {
                 )?;
             }
 
+            Command::NakedQuery => {
+                let status = if self.state.show_tree_node_labels { "- show" } else { "= hide" };
+                self.state.write_line(&format!("naked {status}")).map_err(Error::from)?;
+            }
+
+            Command::NakedSet { show_node_labels } => {
+                self.state.show_tree_node_labels = show_node_labels;
+                let status = if show_node_labels { "- show" } else { "= hide" };
+                self.state.write_line(&format!("naked {status}")).map_err(Error::from)?;
+            }
+
             Command::Ie => {
                 self.run_ie_and_store("ie", crate::engines::ie::IeMode::KeepUpTo(100))?;
             }
@@ -1136,7 +1149,7 @@ impl Vm {
                     return Err(Error::runtime(msg, None, Some(span)));
                 }
 
-                let rendered_all = {
+                let (rendered_all, ttags_target) = {
                     let ds = self.state.dataset.as_ref().ok_or_else(|| {
                         Error::runtime("tplot: dataset not loaded", None, Some(span))
                     })?;
@@ -1161,24 +1174,37 @@ impl Vm {
                         expand_tree_selectors("tplot", &trees, ts.trees.len(), span)?
                     };
 
-                    let rendered_all: std::result::Result<Vec<(usize, Vec<String>)>, String> =
-                        picked
-                            .into_iter()
-                            .map(|i| {
-                                crate::engines::tplot::render_tree(
-                                    &ts.trees[i],
-                                    &ds.taxa,
-                                    outgroups,
-                                    style,
-                                )
-                                .map(|lines| (i, lines))
-                            })
-                            .collect();
+                    let show_node_labels = self.state.show_tree_node_labels;
+                    let ttags_labels = self.state.ttags_labels.clone();
+                    let ttags_target = if self.state.ttags_enabled {
+                        picked.last().map(|&i| ts.trees[i].clone())
+                    } else {
+                        None
+                    };
 
-                    rendered_all.map_err(|m| {
-                        Error::runtime(format!("tplot failed: {m}"), None, Some(span))
-                    })?
+                    let mut rendered_all = Vec::new();
+                    for i in picked {
+                        let labels =
+                            build_tree_node_labels(&ts.trees[i], show_node_labels, &ttags_labels);
+                        let lines = crate::engines::tplot::render_tree(
+                            &ts.trees[i],
+                            &ds.taxa,
+                            outgroups,
+                            style,
+                            Some(&labels),
+                        )
+                        .map_err(|m| {
+                            Error::runtime(format!("tplot failed: {m}"), None, Some(span))
+                        })?;
+                        rendered_all.push((i, lines));
+                    }
+
+                    (rendered_all, ttags_target)
                 };
+
+                if let Some(tree) = ttags_target {
+                    self.state.ttags_target_tree = Some(tree);
+                }
 
                 for (i, lines) in rendered_all {
                     self.state.write_line(&format!("TREE {}", i)).map_err(Error::from)?;
@@ -1207,10 +1233,14 @@ impl Vm {
                     let outgroups = self.state.outgroup.as_ref().map(|og| og.taxa.as_slice());
                     let style = self.state.tree_plot_style;
 
-                    crate::engines::tplot::render_tree_svg(&ts.trees[i], &ds.taxa, outgroups, style)
-                        .map_err(|m| {
-                            Error::runtime(format!("tsvg failed: {m}"), None, Some(span))
-                        })?
+                    crate::engines::tplot::render_tree_svg(
+                        &ts.trees[i],
+                        &ds.taxa,
+                        outgroups,
+                        style,
+                        None,
+                    )
+                    .map_err(|m| Error::runtime(format!("tsvg failed: {m}"), None, Some(span)))?
                 };
 
                 let mut f = OpenOptions::new()
@@ -1225,6 +1255,276 @@ impl Vm {
                 self.state
                     .write_line(&format!("tsvg wrote {}", path.display()))
                     .map_err(Error::from)?;
+            }
+
+            Command::TTags(cmd) => match cmd {
+                TTagsCmd::Query => {
+                    let target = self
+                        .state
+                        .ttags_target_tree
+                        .as_ref()
+                        .map(|t| t.nodes.len().to_string())
+                        .unwrap_or_else(|| "none".to_string());
+                    self.state
+                        .write_line(&format!(
+                            "ttags {} labels={} target_nodes={}",
+                            if self.state.ttags_enabled { "=" } else { "-" },
+                            self.state.ttags_labels.len(),
+                            target
+                        ))
+                        .map_err(Error::from)?;
+                }
+                TTagsCmd::Enable => {
+                    self.state.ttags_enabled = true;
+                    if self.state.ttags_target_tree.is_none() {
+                        if let Some(tree) =
+                            self.state.working_tree_set().and_then(|ts| ts.trees.last()).cloned()
+                        {
+                            self.state.ttags_target_tree = Some(tree);
+                        }
+                    }
+                    self.state.write_line("ttags =").map_err(Error::from)?;
+                }
+                TTagsCmd::Clear => {
+                    self.state.ttags_enabled = false;
+                    self.state.ttags_target_tree = None;
+                    self.state.ttags_labels.clear();
+                    self.state.write_line("ttags -").map_err(Error::from)?;
+                }
+                TTagsCmd::SetLabel { node, label } => {
+                    if self.state.ttags_target_tree.is_none() {
+                        if let Some(tree) =
+                            self.state.working_tree_set().and_then(|ts| ts.trees.last()).cloned()
+                        {
+                            self.state.ttags_target_tree = Some(tree);
+                        }
+                    }
+                    if let Some(target) = self.state.ttags_target_tree.as_ref() {
+                        if node >= target.nodes.len() {
+                            return Err(Error::runtime(
+                                format!(
+                                    "ttags node {node} out of range (nodes={})",
+                                    target.nodes.len()
+                                ),
+                                None,
+                                Some(span),
+                            ));
+                        }
+                    }
+                    self.state.ttags_enabled = true;
+                    let stored = self
+                        .state
+                        .ttags_labels
+                        .entry(node)
+                        .and_modify(|prev| {
+                            if prev.is_empty() {
+                                *prev = label.clone();
+                            } else {
+                                prev.push('/');
+                                prev.push_str(&label);
+                            }
+                        })
+                        .or_insert_with(|| label.clone())
+                        .clone();
+                    self.state
+                        .write_line(&format!("ttags +{node} {stored}"))
+                        .map_err(Error::from)?;
+                }
+                TTagsCmd::WriteSvg(path) => {
+                    let text = {
+                        let ds = self.state.dataset.as_ref().ok_or_else(|| {
+                            Error::runtime("ttags &: dataset not loaded", None, Some(span))
+                        })?;
+                        let target = self.state.ttags_target_tree.as_ref().ok_or_else(|| {
+                            Error::runtime(
+                                "ttags &: no target tree (use ttags=; tplot /; or resample boot N;)",
+                                None,
+                                Some(span),
+                            )
+                        })?;
+                        let outgroups = self.state.outgroup.as_ref().map(|og| og.taxa.as_slice());
+                        let labels = build_tree_node_labels(
+                            target,
+                            self.state.show_tree_node_labels,
+                            &self.state.ttags_labels,
+                        );
+                        crate::engines::tplot::render_tree_svg(
+                            target,
+                            &ds.taxa,
+                            outgroups,
+                            self.state.tree_plot_style,
+                            Some(&labels),
+                        )
+                        .map_err(|m| {
+                            Error::runtime(format!("ttags & failed: {m}"), None, Some(span))
+                        })?
+                    };
+
+                    let mut f = OpenOptions::new()
+                        .create(true)
+                        .truncate(true)
+                        .write(true)
+                        .open(&path)
+                        .map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+
+                    write!(f, "{text}")
+                        .map_err(|e| Error::io(e, Some(path.display().to_string())))?;
+
+                    self.state
+                        .write_line(&format!("ttags wrote {}", path.display()))
+                        .map_err(Error::from)?;
+                }
+            },
+
+            Command::Resample(resample_cmd) => {
+                ensure_tree_context(&self.state)
+                    .map_err(|m| Error::runtime(m, None, Some(span)))?;
+
+                let (method_name, replications, tree, method, search_steps) = match resample_cmd {
+                    ResampleCmd::Boot { replications, tree, search } => (
+                        "boot",
+                        replications,
+                        tree,
+                        crate::engines::resample::ResampleMethod::Bootstrap,
+                        search,
+                    ),
+                    ResampleCmd::Jak { replications, tree, delete_percent, search } => (
+                        "jak",
+                        replications,
+                        tree,
+                        crate::engines::resample::ResampleMethod::Jackknife { delete_percent },
+                        search,
+                    ),
+                    ResampleCmd::Sym { replications, tree, delete_percent, search } => (
+                        "sym",
+                        replications,
+                        tree,
+                        crate::engines::resample::ResampleMethod::Symmetric { delete_percent },
+                        search,
+                    ),
+                };
+
+                let was_ttags_enabled = self.state.ttags_enabled;
+                let (target_tree, ttags_target_matches) = {
+                    let ts = self.state.working_tree_set().ok_or_else(|| {
+                        Error::runtime(
+                            "resample boot: no target tree in working tree set 0",
+                            None,
+                            Some(span),
+                        )
+                    })?;
+                    let picked =
+                        expand_tree_selectors("resample boot from", &[tree], ts.trees.len(), span)?;
+                    let target = ts.trees[picked[0]].clone();
+                    let matches = self
+                        .state
+                        .ttags_target_tree
+                        .as_ref()
+                        .map(|ttags_target| {
+                            ttags_target.to_storage_string() == target.to_storage_string()
+                        })
+                        .unwrap_or(true);
+                    (target, matches)
+                };
+
+                if was_ttags_enabled && !ttags_target_matches {
+                    self.state
+                        .write_line(
+                            "warning: resample target differs from current ttags target; old ttags labels not merged",
+                        )
+                        .map_err(Error::from)?;
+                }
+
+                let result = {
+                    let ds = self.state.dataset.as_ref().ok_or_else(|| {
+                        Error::runtime("resample boot: dataset not loaded", None, Some(span))
+                    })?;
+                    let cfg = self.state.char_config.as_ref().ok_or_else(|| {
+                        Error::runtime("resample boot: ccode config not loaded", None, Some(span))
+                    })?;
+                    let outgroups =
+                        self.state.outgroup.as_ref().map(|og| og.taxa.clone()).ok_or_else(
+                            || Error::runtime("resample boot: outgroup not set", None, Some(span)),
+                        )?;
+
+                    crate::engines::resample::bootstrap_support(
+                        ds,
+                        cfg,
+                        &target_tree,
+                        &outgroups,
+                        replications,
+                        method,
+                        &search_steps,
+                    )
+                    .map_err(|m| {
+                        Error::runtime(
+                            format!("resample {method_name} failed: {m}"),
+                            None,
+                            Some(span),
+                        )
+                    })?
+                };
+
+                let mut labels = result.labels;
+                if was_ttags_enabled && ttags_target_matches {
+                    let prefix_cols = self
+                        .state
+                        .ttags_labels
+                        .values()
+                        .map(|label| label.split('/').count())
+                        .max()
+                        .unwrap_or(0);
+                    for (node, label) in labels.iter_mut() {
+                        if let Some(prev) = self.state.ttags_labels.get(node) {
+                            if !prev.is_empty() {
+                                *label = format!("{prev}/{label}");
+                            }
+                        } else if prefix_cols > 0 {
+                            *label = format!("{}{label}", "/".repeat(prefix_cols));
+                        }
+                    }
+                    for (node, label) in &self.state.ttags_labels {
+                        labels.entry(*node).or_insert_with(|| label.clone());
+                    }
+                }
+
+                let nlabels = labels.len();
+                let immediate_plot = if was_ttags_enabled {
+                    None
+                } else {
+                    let ds = self.state.dataset.as_ref().ok_or_else(|| {
+                        Error::runtime("resample boot: dataset not loaded", None, Some(span))
+                    })?;
+                    let outgroups = self.state.outgroup.as_ref().map(|og| og.taxa.as_slice());
+                    Some(
+                        crate::engines::tplot::render_tree_branch_labels(
+                            &result.target_tree,
+                            &ds.taxa,
+                            outgroups,
+                            self.state.tree_plot_style,
+                            &labels,
+                        )
+                        .map_err(|m| {
+                            Error::runtime(
+                                format!("resample boot plot failed: {m}"),
+                                None,
+                                Some(span),
+                            )
+                        })?,
+                    )
+                };
+
+                self.state.ttags_target_tree = Some(result.target_tree);
+                self.state.ttags_labels = labels;
+                self.state
+                    .write_line(&format!("resample {method_name} {replications} labels={nlabels}"))
+                    .map_err(Error::from)?;
+                if let Some(lines) = immediate_plot {
+                    self.state.write_line("TREE /").map_err(Error::from)?;
+                    for line in lines {
+                        self.state.write_line(&line).map_err(Error::from)?;
+                    }
+                }
             }
 
             Command::Apo { tree, path, optimization } => {
@@ -1827,6 +2127,33 @@ impl Vm {
         }
         .map_err(Error::from)
     }
+}
+
+fn build_tree_node_labels(
+    tree: &crate::engines::trees::Tree,
+    show_node_ids: bool,
+    tags: &HashMap<usize, String>,
+) -> HashMap<usize, String> {
+    let mut out = HashMap::new();
+    for (node_id, node) in tree.nodes.iter().enumerate() {
+        if node.taxon.is_some() {
+            continue;
+        }
+
+        match (show_node_ids, tags.get(&node_id)) {
+            (true, Some(tag)) if !tag.is_empty() => {
+                out.insert(node_id, format!("{node_id}/{tag}"));
+            }
+            (true, _) => {
+                out.insert(node_id, node_id.to_string());
+            }
+            (false, Some(tag)) if !tag.is_empty() => {
+                out.insert(node_id, tag.clone());
+            }
+            (false, _) => {}
+        }
+    }
+    out
 }
 /// detects whether a REPL input buffer contains a quit command that should end
 /// interactive execution.

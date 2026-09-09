@@ -26,13 +26,14 @@ pub fn render_tree(
     taxon_names: &[String],
     outgroups: Option<&[usize]>,
     style: TPlotStyle,
+    node_labels: Option<&HashMap<usize, String>>,
 ) -> Result<Vec<String>, String> {
     let mut rooted = tree.clone();
     let _ = outgroups;
 
     util::order_children_for_plot(&mut rooted);
 
-    let layout = Layout::build(&rooted, rooted.root, taxon_names)?;
+    let layout = Layout::build(&rooted, rooted.root, taxon_names, node_labels)?;
     let width = layout.width();
 
     let mut out = Vec::with_capacity(layout.lines.len());
@@ -49,6 +50,37 @@ pub fn render_tree(
     Ok(util::apply_charset(out, style == TPlotStyle::Unicode))
 }
 
+/// renders a text tree with internal node labels written onto the branch leading
+/// to each labeled node. Used by `resample` for immediate support plots.
+pub fn render_tree_branch_labels(
+    tree: &Tree,
+    taxon_names: &[String],
+    outgroups: Option<&[usize]>,
+    style: TPlotStyle,
+    node_labels: &HashMap<usize, String>,
+) -> Result<Vec<String>, String> {
+    let mut rooted = tree.clone();
+    let _ = outgroups;
+
+    util::order_children_for_plot(&mut rooted);
+
+    let layout = BranchLabelLayout::build(&rooted, rooted.root, taxon_names, node_labels)?;
+    let width = layout.width();
+    let mut out = Vec::with_capacity(layout.lines.len());
+    for row in &layout.lines {
+        let mut line = String::with_capacity(width);
+        for cell in row {
+            line.push(*cell);
+        }
+        while line.ends_with(' ') {
+            line.pop();
+        }
+        out.push(line);
+    }
+
+    Ok(util::apply_charset(out, style == TPlotStyle::Unicode))
+}
+
 /// renders a tree into a standalone SVG document using the same character-grid
 /// layout as `render_tree`.
 pub fn render_tree_svg(
@@ -56,6 +88,7 @@ pub fn render_tree_svg(
     taxon_names: &[String],
     outgroups: Option<&[usize]>,
     style: TPlotStyle,
+    node_labels: Option<&HashMap<usize, String>>,
 ) -> Result<String, String> {
     let mut rooted = tree.clone();
     let _ = outgroups;
@@ -63,11 +96,19 @@ pub fn render_tree_svg(
 
     util::order_children_for_plot(&mut rooted);
 
-    let layout = Layout::build(&rooted, rooted.root, taxon_names)?;
-    let cols = layout.width().max(1);
+    let layout = Layout::build_svg(&rooted, rooted.root, taxon_names, node_labels)?;
+    let label_cols =
+        layout.labels.iter().map(|label| label.col + label.text.chars().count()).max().unwrap_or(0);
+    let cols = layout.width().max(label_cols).max(1);
     let rows = layout.lines.len().max(1);
 
-    let margin = 12.0;
+    let left_label_pad = layout
+        .labels
+        .iter()
+        .filter(|label| label.anchor == LabelAnchor::End)
+        .map(|label| label.text.chars().count() as f64 * 7.0 + 8.0)
+        .fold(0.0, f64::max);
+    let margin = 36.0 + left_label_pad;
     let cell_w = 9.0;
     let cell_h = 18.0;
     let label_gap = 4.0;
@@ -85,36 +126,42 @@ pub fn render_tree_svg(
     svg.push_str(
         "<g fill=\"none\" stroke=\"black\" stroke-width=\"3\" stroke-linecap=\"square\">\n",
     );
+    if let Some(root_stem) = root_stem_path(&layout, margin, cell_w, cell_h) {
+        svg.push_str("<path d=\"");
+        svg.push_str(&root_stem);
+        svg.push_str("\"/>\n");
+    }
     for branch_path in connector_paths(&layout, margin, cell_w, cell_h) {
         svg.push_str("<path d=\"");
         svg.push_str(&branch_path);
         svg.push_str("\"/>\n");
     }
     svg.push_str("</g>\n");
+    let node_font_size = font_size - 2.0;
+    svg.push_str(&format!(
+        "<g font-family=\"Arial, DejaVu Sans Mono, Consolas, monospace\" font-size=\"{node_font_size}\" font-style=\"normal\" font-weight=\"normal\" fill=\"black\">\n"
+    ));
+    for label in layout.labels.iter().filter(|x| x.kind == LabelKind::Node) {
+        let x = margin + label.col as f64 * cell_w + label.dx;
+        let y = margin + label.row as f64 * cell_h + cell_h / 2.0 - 8.0;
+        svg.push_str(&format!(
+            "<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"{}\">",
+            label.anchor.svg_value()
+        ));
+        push_xml_escaped(&mut svg, &label.text);
+        svg.push_str("</text>\n");
+    }
+    svg.push_str("</g>\n");
+
     svg.push_str(&format!(
         "<g font-family=\"Arial, DejaVu Sans Mono, Consolas, monospace\" font-size=\"{font_size}\" font-style=\"italic\" font-weight=\"bold\" fill=\"black\">\n"
     ));
-    for (r, row) in layout.lines.iter().enumerate() {
-        let mut c = 0usize;
-        while c < row.len() {
-            if row[c] == ' ' || is_connector(row[c]) {
-                c += 1;
-                continue;
-            }
-
-            let start = c;
-            let mut label = String::new();
-            while c < row.len() && row[c] != ' ' && !is_connector(row[c]) {
-                label.push(row[c]);
-                c += 1;
-            }
-
-            let x = margin + start as f64 * cell_w + label_gap;
-            let y = margin + r as f64 * cell_h + cell_h / 2.0;
-            svg.push_str(&format!("<text x=\"{x:.1}\" y=\"{y:.1}\" dominant-baseline=\"middle\">"));
-            push_xml_escaped(&mut svg, &label);
-            svg.push_str("</text>\n");
-        }
+    for label in layout.labels.iter().filter(|x| x.kind == LabelKind::Tip) {
+        let x = margin + label.col as f64 * cell_w + label_gap;
+        let y = margin + label.row as f64 * cell_h + cell_h / 2.0;
+        svg.push_str(&format!("<text x=\"{x:.1}\" y=\"{y:.1}\" dominant-baseline=\"middle\">"));
+        push_xml_escaped(&mut svg, &label.text);
+        svg.push_str("</text>\n");
     }
     svg.push_str("</g>\n</svg>\n");
     Ok(svg)
@@ -414,6 +461,17 @@ fn connector_paths(layout: &Layout, margin: f64, cell_w: f64, cell_h: f64) -> Ve
     out
 }
 
+/// adds a short incoming stem to the root so SVG output matches the editable
+/// tree style used by apomorphy SVGs.
+fn root_stem_path(layout: &Layout, margin: f64, cell_w: f64, cell_h: f64) -> Option<String> {
+    let row = layout.lines.get(layout.anchor_row)?;
+    let connector_col = row.iter().position(|&ch| is_connector(ch))?;
+    let y = svg_y(layout.anchor_row as i32 * 2 + 1, margin, cell_h);
+    let x2 = svg_x(connector_col as i32 * 2 + 1, margin, cell_w);
+    let x1 = x2 - 21.0;
+    Some(format!("M {x1:.1} {y:.1} H {x2:.1}"))
+}
+
 /// returns the horizontal grid span contributed by one connector cell.
 fn horizontal_part(row: &[char], c: usize) -> Option<(i32, i32)> {
     let x = c as i32 * 2 + 1;
@@ -525,25 +583,237 @@ fn push_xml_escaped(out: &mut String, text: &str) {
 struct Layout {
     lines: Vec<Vec<char>>,
     anchor_row: usize,
+    labels: Vec<LayoutLabel>,
+}
+
+#[derive(Debug, Clone)]
+struct LayoutLabel {
+    row: usize,
+    col: usize,
+    dx: f64,
+    text: String,
+    kind: LabelKind,
+    anchor: LabelAnchor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelKind {
+    Tip,
+    Node,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelAnchor {
+    Start,
+    End,
+}
+
+impl LabelAnchor {
+    fn svg_value(self) -> &'static str {
+        match self {
+            LabelAnchor::Start => "start",
+            LabelAnchor::End => "end",
+        }
+    }
+}
+
+fn layout_label(row: usize, col: usize, text: String, kind: LabelKind) -> LayoutLabel {
+    LayoutLabel { row, col, dx: 4.0, text, kind, anchor: LabelAnchor::Start }
 }
 
 impl Layout {
     /// recursively lays out a subtree with child connector rows and leaf labels.
-    fn build(tree: &Tree, node: usize, taxon_names: &[String]) -> Result<Self, String> {
+    fn build(
+        tree: &Tree,
+        node: usize,
+        taxon_names: &[String],
+        node_labels: Option<&HashMap<usize, String>>,
+    ) -> Result<Self, String> {
+        Self::build_impl(tree, node, taxon_names, node_labels, true)
+    }
+
+    /// builds SVG geometry without letting node-label text alter connector columns.
+    fn build_svg(
+        tree: &Tree,
+        node: usize,
+        taxon_names: &[String],
+        node_labels: Option<&HashMap<usize, String>>,
+    ) -> Result<Self, String> {
+        Self::build_svg_impl(tree, node, taxon_names, node_labels, true)
+    }
+
+    fn build_svg_impl(
+        tree: &Tree,
+        node: usize,
+        taxon_names: &[String],
+        node_labels: Option<&HashMap<usize, String>>,
+        is_root: bool,
+    ) -> Result<Self, String> {
         let n = &tree.nodes[node];
 
         if let Some(t) = n.taxon {
             let label = taxon_names.get(t).cloned().unwrap_or_else(|| format!("{t}"));
-            return Ok(Self { lines: vec![label.chars().collect()], anchor_row: 0 });
+            return Ok(Self {
+                lines: vec![label.chars().collect()],
+                anchor_row: 0,
+                labels: vec![layout_label(0, 0, label, LabelKind::Tip)],
+            });
         }
 
         if n.children.is_empty() {
-            return Ok(Self { lines: vec![format!("#{node}").chars().collect()], anchor_row: 0 });
+            let label = format!("#{node}");
+            return Ok(Self {
+                lines: vec![label.chars().collect()],
+                anchor_row: 0,
+                labels: vec![layout_label(0, 0, label, LabelKind::Node)],
+            });
+        }
+
+        let mut child_blocks = Vec::with_capacity(n.children.len());
+        let mut branch_label_widths = Vec::with_capacity(n.children.len());
+        for &ch in &n.children {
+            child_blocks.push(Self::build_svg_impl(tree, ch, taxon_names, node_labels, false)?);
+            let w = node_labels
+                .and_then(|labels| labels.get(&ch))
+                .map(|s| s.chars().count() + 2)
+                .unwrap_or(2);
+            branch_label_widths.push(w);
+        }
+
+        let gap = 1usize;
+        let mut total_rows = 0usize;
+        let mut child_anchor_rows = Vec::with_capacity(child_blocks.len());
+        for (i, block) in child_blocks.iter().enumerate() {
+            if i > 0 {
+                total_rows += gap;
+            }
+            child_anchor_rows.push(total_rows + block.anchor_row);
+            total_rows += block.lines.len();
+        }
+
+        let anchor_row = match (child_anchor_rows.first(), child_anchor_rows.last()) {
+            (Some(&a), Some(&b)) => (a + b) / 2,
+            _ => 0,
+        };
+
+        let branch_width = branch_label_widths.into_iter().max().unwrap_or(2);
+        let child_width = child_blocks.iter().map(|b| b.width()).max().unwrap_or(0);
+        let left_width = 1 + branch_width;
+        let total_width = left_width + child_width;
+        let mut lines = vec![vec![' '; total_width]; total_rows];
+        let mut labels = Vec::new();
+
+        for (block_idx, block) in child_blocks.iter().enumerate() {
+            let top =
+                if block_idx == 0 { 0 } else { child_anchor_rows[block_idx] - block.anchor_row };
+            for (r, src_line) in block.lines.iter().enumerate() {
+                let dst_r = top + r;
+                for (c, ch) in src_line.iter().enumerate() {
+                    lines[dst_r][left_width + c] = *ch;
+                }
+            }
+
+            for label in &block.labels {
+                labels.push(LayoutLabel {
+                    row: top + label.row,
+                    col: left_width + label.col,
+                    dx: label.dx,
+                    text: label.text.clone(),
+                    kind: label.kind,
+                    anchor: label.anchor,
+                });
+            }
+        }
+
+        if let (Some(&min_r), Some(&max_r)) = (child_anchor_rows.first(), child_anchor_rows.last())
+        {
+            for r in min_r..=max_r {
+                if r != anchor_row && !child_anchor_rows.contains(&r) {
+                    lines[r][0] = '│';
+                }
+            }
+            if lines[anchor_row][0] == ' ' {
+                lines[anchor_row][0] = '│';
+            }
+        }
+
+        for (idx, &r) in child_anchor_rows.iter().enumerate() {
+            lines[r][0] = if idx == 0 {
+                '┌'
+            } else if idx + 1 == child_anchor_rows.len() {
+                '└'
+            } else {
+                '├'
+            };
+            for c in 1..=branch_width {
+                lines[r][c] = '─';
+            }
+            if let Some(label) =
+                node_labels.and_then(|node_labels| node_labels.get(&n.children[idx]))
+            {
+                labels.push(LayoutLabel {
+                    row: r,
+                    col: 1,
+                    dx: 4.0,
+                    text: label.clone(),
+                    kind: LabelKind::Node,
+                    anchor: LabelAnchor::Start,
+                });
+            }
+        }
+
+        if is_root {
+            if let Some(label) = node_labels.and_then(|node_labels| node_labels.get(&node)) {
+                labels.push(LayoutLabel {
+                    row: anchor_row,
+                    col: 0,
+                    dx: -4.0,
+                    text: label.clone(),
+                    kind: LabelKind::Node,
+                    anchor: LabelAnchor::End,
+                });
+            }
+        }
+
+        Ok(Self { lines, anchor_row, labels })
+    }
+
+    fn build_impl(
+        tree: &Tree,
+        node: usize,
+        taxon_names: &[String],
+        node_labels: Option<&HashMap<usize, String>>,
+        reserve_node_label_space: bool,
+    ) -> Result<Self, String> {
+        let n = &tree.nodes[node];
+
+        if let Some(t) = n.taxon {
+            let label = taxon_names.get(t).cloned().unwrap_or_else(|| format!("{t}"));
+            return Ok(Self {
+                lines: vec![label.chars().collect()],
+                anchor_row: 0,
+                labels: vec![layout_label(0, 0, label, LabelKind::Tip)],
+            });
+        }
+
+        if n.children.is_empty() {
+            let label = format!("#{node}");
+            return Ok(Self {
+                lines: vec![label.chars().collect()],
+                anchor_row: 0,
+                labels: vec![layout_label(0, 0, label, LabelKind::Node)],
+            });
         }
 
         let mut child_blocks = Vec::with_capacity(n.children.len());
         for &ch in &n.children {
-            child_blocks.push(Self::build(tree, ch, taxon_names)?);
+            child_blocks.push(Self::build_impl(
+                tree,
+                ch,
+                taxon_names,
+                node_labels,
+                reserve_node_label_space,
+            )?);
         }
 
         let gap = 1usize;
@@ -564,9 +834,16 @@ impl Layout {
         };
 
         let child_width = child_blocks.iter().map(|b| b.width()).max().unwrap_or(0);
-        let left_width = 3usize; /* connector area */
+        let node_label = node_labels.and_then(|labels| labels.get(&node));
+        let node_label_width = if reserve_node_label_space {
+            node_label.map(|s| s.chars().count()).unwrap_or(0)
+        } else {
+            0
+        };
+        let left_width = node_label_width + 3usize; /* optional label + connector area */
         let total_width = left_width + child_width;
         let mut lines = vec![vec![' '; total_width]; total_rows];
+        let mut labels = Vec::new();
 
         for (block_idx, block) in child_blocks.iter().enumerate() {
             let top =
@@ -578,7 +855,36 @@ impl Layout {
                     lines[dst_r][left_width + c] = *ch;
                 }
             }
+
+            for label in &block.labels {
+                labels.push(LayoutLabel {
+                    row: top + label.row,
+                    col: left_width + label.col,
+                    dx: label.dx,
+                    text: label.text.clone(),
+                    kind: label.kind,
+                    anchor: label.anchor,
+                });
+            }
         }
+
+        if let Some(label) = node_label {
+            if reserve_node_label_space {
+                for (c, ch) in label.chars().enumerate() {
+                    lines[anchor_row][c] = ch;
+                }
+            }
+            labels.push(LayoutLabel {
+                row: anchor_row,
+                col: 0,
+                dx: 4.0,
+                text: label.clone(),
+                kind: LabelKind::Node,
+                anchor: LabelAnchor::Start,
+            });
+        }
+
+        let conn = node_label_width;
 
         for r in 0..total_rows {
             if r == anchor_row {
@@ -599,8 +905,120 @@ impl Layout {
                     && child_anchor_rows.iter().any(|&x| x <= r))
             {
                 if !intersects_child_anchor {
+                    lines[r][conn] = '│';
+                }
+            }
+        }
+
+        for (idx, &r) in child_anchor_rows.iter().enumerate() {
+            lines[r][conn] = if idx == 0 {
+                '┌'
+            } else if idx + 1 == child_anchor_rows.len() {
+                '└'
+            } else {
+                '├'
+            };
+            lines[r][conn + 1] = '─';
+            lines[r][conn + 2] = '─';
+        }
+
+        if !child_anchor_rows.is_empty() {
+            let min_r = *child_anchor_rows.first().unwrap();
+            let max_r = *child_anchor_rows.last().unwrap();
+            for r in min_r..=max_r {
+                if r != anchor_row && !child_anchor_rows.contains(&r) {
+                    lines[r][conn] = '│';
+                }
+            }
+            if lines[anchor_row][conn] == ' ' {
+                lines[anchor_row][conn] = '│';
+            }
+        }
+
+        Ok(Self { lines, anchor_row, labels })
+    }
+    /// returns the maximum rendered row width for padding.
+
+    fn width(&self) -> usize {
+        self.lines.iter().map(|x| x.len()).max().unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BranchLabelLayout {
+    lines: Vec<Vec<char>>,
+    anchor_row: usize,
+}
+
+impl BranchLabelLayout {
+    /// recursively lays out a subtree while inserting node labels into the
+    /// branch segment leading to each child node.
+    fn build(
+        tree: &Tree,
+        node: usize,
+        taxon_names: &[String],
+        node_labels: &HashMap<usize, String>,
+    ) -> Result<Self, String> {
+        let n = &tree.nodes[node];
+
+        if let Some(t) = n.taxon {
+            let label = taxon_names.get(t).cloned().unwrap_or_else(|| format!("{t}"));
+            return Ok(Self { lines: vec![label.chars().collect()], anchor_row: 0 });
+        }
+
+        if n.children.is_empty() {
+            return Ok(Self { lines: vec![format!("#{node}").chars().collect()], anchor_row: 0 });
+        }
+
+        let mut child_blocks = Vec::with_capacity(n.children.len());
+        let mut branch_labels = Vec::with_capacity(n.children.len());
+        for &child in &n.children {
+            child_blocks.push(Self::build(tree, child, taxon_names, node_labels)?);
+            branch_labels.push(format_node_branch_label(node_labels.get(&child)));
+        }
+
+        let gap = 1usize;
+        let mut total_rows = 0usize;
+        let mut child_anchor_rows = Vec::with_capacity(child_blocks.len());
+        for (i, block) in child_blocks.iter().enumerate() {
+            if i > 0 {
+                total_rows += gap;
+            }
+            child_anchor_rows.push(total_rows + block.anchor_row);
+            total_rows += block.lines.len();
+        }
+
+        let anchor_row = match (child_anchor_rows.first(), child_anchor_rows.last()) {
+            (Some(&a), Some(&b)) => (a + b) / 2,
+            _ => 0,
+        };
+
+        let branch_width = branch_labels.iter().map(|s| s.chars().count()).max().unwrap_or(2);
+        let child_width = child_blocks.iter().map(|b| b.width()).max().unwrap_or(0);
+        let left_width = 1 + branch_width;
+        let total_width = left_width + child_width;
+        let mut lines = vec![vec![' '; total_width]; total_rows];
+
+        for (block_idx, block) in child_blocks.iter().enumerate() {
+            let top =
+                if block_idx == 0 { 0 } else { child_anchor_rows[block_idx] - block.anchor_row };
+            for (r, src_line) in block.lines.iter().enumerate() {
+                let dst_r = top + r;
+                for (c, ch) in src_line.iter().enumerate() {
+                    lines[dst_r][left_width + c] = *ch;
+                }
+            }
+        }
+
+        if let (Some(&min_r), Some(&max_r)) = (child_anchor_rows.first(), child_anchor_rows.last())
+        {
+            for r in min_r..=max_r {
+                if r != anchor_row && !child_anchor_rows.contains(&r) {
                     lines[r][0] = '│';
                 }
+            }
+            if lines[anchor_row][0] == ' ' {
+                lines[anchor_row][0] = '│';
             }
         }
 
@@ -612,27 +1030,14 @@ impl Layout {
             } else {
                 '├'
             };
-            lines[r][1] = '─';
-            lines[r][2] = '─';
-        }
-
-        if !child_anchor_rows.is_empty() {
-            let min_r = *child_anchor_rows.first().unwrap();
-            let max_r = *child_anchor_rows.last().unwrap();
-            for r in min_r..=max_r {
-                if r != anchor_row && !child_anchor_rows.contains(&r) {
-                    lines[r][0] = '│';
-                }
-            }
-            if lines[anchor_row][0] == ' ' {
-                lines[anchor_row][0] = '│';
+            let branch = pad_branch_label(&branch_labels[idx], branch_width);
+            for (c, ch) in branch.chars().enumerate() {
+                lines[r][1 + c] = ch;
             }
         }
 
-        /* internal-node label hook reserved here; currently hidden by default. */
         Ok(Self { lines, anchor_row })
     }
-    /// returns the maximum rendered row width for padding.
 
     fn width(&self) -> usize {
         self.lines.iter().map(|x| x.len()).max().unwrap_or(0)
@@ -757,6 +1162,14 @@ fn format_apo_branch_label(changes: Option<&Vec<&ApoBranchChange>>) -> String {
 
     let labels = changes.iter().map(|x| x.character.to_string()).collect::<Vec<_>>().join(",");
     format!("─{labels}─")
+}
+
+/// Formats a support/node label as part of a horizontal branch segment.
+fn format_node_branch_label(label: Option<&String>) -> String {
+    let Some(label) = label else {
+        return "──".to_string();
+    };
+    if label.is_empty() { "──".to_string() } else { format!("─{label}─") }
 }
 
 /// Pads a branch label with horizontal connector characters so sibling branches

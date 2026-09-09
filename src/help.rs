@@ -156,6 +156,15 @@ static TOPICS: &[HelpTopic] = &[
         details: &["nelsen;         calculate nelson consensus tree"],
     },
     HelpTopic {
+        name: "naked",
+        summary: "show or hide tree node labels",
+        details: &[
+            "naked;         show node-label display status",
+            "naked =;       hide tree node labels (default)",
+            "naked -;       show tree node labels in tplot/ttags SVG",
+        ],
+    },
+    HelpTopic {
         name: "outgroup",
         summary: "control outgroup",
         details: &[
@@ -183,6 +192,22 @@ static TOPICS: &[HelpTopic] = &[
         name: "reroot",
         summary: "reroot current treefile according to current outgroup",
         details: &["reroot;         current treefile according to current outgroup"],
+    },
+    HelpTopic {
+        name: "resample",
+        summary: "resampling support on a target tree",
+        details: &[
+            "resample boot n; estimate bootstrap support for target-tree nodes",
+            "resample boot n from t; use tree t as target (default: from /)",
+            "resample jak n; independent-deletion jackknife support",
+            "resample jak n delete 36.8; set deletion percentage",
+            "resample sym n; symmetric resampling (default delete/up 33%)",
+            "resample sym n delete 33; set equal down/up percentage",
+            "resample boot n [mh; bb;]; set replicate search strategy",
+            "resample boot n [mh*; bb*;]; use unlimited-tree star search steps",
+            "resample boot n [ie;], [ie*;], or [ie-;]; use implicit enumeration",
+            "                 support labels are stored in ttags for SVG output",
+        ],
     },
     HelpTopic {
         name: "steps",
@@ -227,6 +252,17 @@ static TOPICS: &[HelpTopic] = &[
         details: &[
             "tsvg n f;       save tree n as SVG file f",
             "                if n is /, last tree is chosen",
+        ],
+    },
+    HelpTopic {
+        name: "ttags",
+        summary: "store tree node labels and export SVG",
+        details: &[
+            "ttags;         show ttags status",
+            "ttags =;       enable labels and select the last tree if available",
+            "ttags -;       clear labels and target tree",
+            "ttags +N txt;  write txt to node N of the target tree",
+            "ttags & f;     write target tree with labels to SVG file f",
         ],
     },
     HelpTopic {

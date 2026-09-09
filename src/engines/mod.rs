@@ -14,6 +14,8 @@ pub mod consensus;
 pub mod dataset;
 /// Implicit enumeration (exact branch-and-bound search).
 pub mod ie;
+/// Bootstrap/jackknife-style resampling support calculations.
+pub mod resample;
 /// Core parsimony search: Wagner trees, scoring, topology hashing, branch
 /// collapse.
 pub mod search;

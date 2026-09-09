@@ -17,6 +17,7 @@ pub enum TokenKind {
     Eq,       /* = */
     Slash,    /* / */
     Star,     /* * */
+    Amp,      /* & */
     Plus,     /* + */
     Minus,    /* - */
     Dot,      /* . */
@@ -77,6 +78,10 @@ impl<'a> Lexer<'a> {
                 '*' => {
                     self.i += 1;
                     TokenKind::Star
+                }
+                '&' => {
+                    self.i += 1;
+                    TokenKind::Amp
                 }
                 '+' => {
                     self.i += 1;
