@@ -470,14 +470,18 @@ impl Parser {
                     })
                 }
             }
-        } else if eq_ci(name_norm, "apo") {
-            let optimization = if self.try_consume_discriminant(TokenKind::Plus) {
-                ApoOptimization::Fast
-            } else if self.try_consume_discriminant(TokenKind::Minus) {
-                ApoOptimization::Slow
+        } else if eq_ci(name_norm, "optcode") {
+            if self.try_consume_discriminant(TokenKind::Semi) {
+                Command::OptCode(OptCodeCmd::Query)
             } else {
-                ApoOptimization::Unambiguous
-            };
+                let mut ops = vec![self.parse_optcode_op()?];
+                while self.try_consume_discriminant(TokenKind::Star) {
+                    ops.push(self.parse_optcode_op()?);
+                }
+                self.expect_semi()?;
+                Command::OptCode(OptCodeCmd::Apply(ops))
+            }
+        } else if eq_ci(name_norm, "apo") {
             let tree = self.parse_single_tree_selector("apo")?;
             let path = if self.peek().map(|t| t.kind == TokenKind::Semi).unwrap_or(false) {
                 None
@@ -485,7 +489,7 @@ impl Parser {
                 Some(self.parse_path_like()?)
             };
             self.expect_semi()?;
-            Command::Apo { tree, path, optimization }
+            Command::Apo { tree, path }
         } else if eq_ci(name_norm, "xsteps") {
             /* `xsteps;` defaults to `xsteps l;`. */
             if let Some(tok) = self.peek().cloned() {
@@ -985,6 +989,38 @@ impl Parser {
 
         Ok(CharSel::List(ranges))
     }
+    /// Parses optcode's `.` all-character shorthand or a numeric character list.
+    fn parse_optcode_char_sel(&mut self) -> Result<CharSel> {
+        if self.try_consume_discriminant(TokenKind::Dot)
+            || self.try_consume_discriminant(TokenKind::Slash)
+        {
+            return Ok(CharSel::All);
+        }
+
+        let mut ranges = vec![self.parse_char_range()?];
+        while let Some(tok) = self.peek() {
+            if matches!(tok.kind, TokenKind::Star | TokenKind::Semi) {
+                break;
+            }
+            ranges.push(self.parse_char_range()?);
+        }
+        Ok(CharSel::List(ranges))
+    }
+    /// Parses one `u|f|s character-list` optcode operation.
+    fn parse_optcode_op(&mut self) -> Result<OptCodeOp> {
+        let mode = self
+            .peek()
+            .cloned()
+            .ok_or_else(|| self.err_parse("expected optcode mode: u, f, or s", None))?;
+        let optimization = match mode.kind {
+            TokenKind::Ident(s) if s.eq_ignore_ascii_case("u") => ApoOptimization::Unambiguous,
+            TokenKind::Ident(s) if s.eq_ignore_ascii_case("f") => ApoOptimization::Fast,
+            TokenKind::Ident(s) if s.eq_ignore_ascii_case("s") => ApoOptimization::Slow,
+            _ => return Err(self.err_parse("optcode mode must be u, f, or s", Some(mode.span))),
+        };
+        self.bump();
+        Ok(OptCodeOp { optimization, chars: self.parse_optcode_char_sel()? })
+    }
     /// parses a single character number or inclusive `a.b` range.
 
     fn parse_char_range(&mut self) -> Result<CharRange> {
@@ -1199,6 +1235,7 @@ fn normalize_cmd_name(name: &str) -> &str {
         ("hennig", 1),    /* h... */
         ("ie", 1),        /* i... */
         ("keep", 1),      /* k... */
+        ("optcode", 3),   /* opt... */
         ("log", 1),       /* l... */
         ("mhennig", 1),   /* m... */
         ("naked", 4),     /* nake... */

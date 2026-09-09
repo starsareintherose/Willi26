@@ -22,7 +22,7 @@ use crate::{
 };
 
 const ASSIST_CMD_LIST: &str = "\
-apo       assist    batch     bb        bytes     ccode     cget\n\
+apo       assist    batch     bb        bytes     ccode     cget      optcode\n\
 ckeep     display   erase     files     get       hennig    ie\n\
 keep      log       mhennig   naked     nelsen    outgroup  procedure\n\
 quote     reroot    resample  steps     tchoose   tlist     tplot\n\
@@ -531,6 +531,8 @@ impl Vm {
                     let title = ds.title.clone().unwrap_or_default();
                     self.state.dataset = Some(ds);
                     self.state.char_config = Some(crate::engines::ccode::CharConfig::new(nchar));
+                    self.state.apo_optimizations =
+                        Some(vec![crate::ast::ApoOptimization::Unambiguous; nchar]);
                     self.state.clear_all_trees();
                     self.state.outgroup = Some(crate::state::OutgroupState::new(vec![0]));
                     self.state.write_line("xread").map_err(Error::from)?;
@@ -1527,7 +1529,60 @@ impl Vm {
                 }
             }
 
-            Command::Apo { tree, path, optimization } => {
+            Command::OptCode(cmd) => match cmd {
+                OptCodeCmd::Query => {
+                    let nchar = self
+                        .state
+                        .dataset
+                        .as_ref()
+                        .ok_or_else(|| {
+                            Error::runtime("optcode: dataset not loaded", None, Some(span))
+                        })?
+                        .nchar;
+                    let codes = self.state.apo_optimizations.as_deref().ok_or_else(|| {
+                        Error::runtime("optcode: not initialized", None, Some(span))
+                    })?;
+                    if codes.len() != nchar {
+                        return Err(Error::runtime(
+                            "optcode: character count mismatch",
+                            None,
+                            Some(span),
+                        ));
+                    }
+                    self.state.write_line(&format_optcode(codes)).map_err(Error::from)?;
+                }
+                OptCodeCmd::Apply(ops) => {
+                    let nchar = self
+                        .state
+                        .dataset
+                        .as_ref()
+                        .ok_or_else(|| {
+                            Error::runtime("optcode: dataset not loaded", None, Some(span))
+                        })?
+                        .nchar;
+                    let mut assignments = Vec::with_capacity(ops.len());
+                    for op in ops {
+                        let selected = iter_char_sel(nchar, &op.chars).map_err(|m| {
+                            Error::runtime(format!("optcode: {m}"), None, Some(span))
+                        })?;
+                        assignments.push((op.optimization, selected));
+                    }
+                    let codes = self.state.apo_optimizations.get_or_insert_with(|| {
+                        vec![crate::ast::ApoOptimization::Unambiguous; nchar]
+                    });
+                    if codes.len() != nchar {
+                        *codes = vec![crate::ast::ApoOptimization::Unambiguous; nchar];
+                    }
+                    for (optimization, selected) in assignments {
+                        for ch in selected {
+                            codes[ch] = optimization;
+                        }
+                    }
+                    self.state.write_line("optcode updated").map_err(Error::from)?;
+                }
+            },
+
+            Command::Apo { tree, path } => {
                 if let Err(msg) = ensure_tree_context(&self.state) {
                     return Err(Error::runtime(msg, None, Some(span)));
                 }
@@ -1548,11 +1603,15 @@ impl Vm {
                     let picked = expand_tree_selectors("apo", &[tree], ts.trees.len(), span)?;
                     let i = picked[0];
                     let root_taxon = self.state.outgroup.as_ref().and_then(|og| og.first());
+                    let optimizations =
+                        self.state.apo_optimizations.as_deref().ok_or_else(|| {
+                            Error::runtime("apo: optcode not initialized", None, Some(span))
+                        })?;
                     let annotations = crate::engines::apo::detect_apomorphic_changes(
                         ds,
                         cfg,
                         &ts.trees[i],
-                        optimization,
+                        optimizations,
                         root_taxon,
                     )
                     .map_err(|m| Error::runtime(format!("apo failed: {m}"), None, Some(span)))?;
@@ -2281,6 +2340,28 @@ fn iter_char_sel(
         }
     }
     Ok(out)
+}
+
+/// Formats current optcode settings as a table that is also executable verbatim.
+fn format_optcode(codes: &[crate::ast::ApoOptimization]) -> String {
+    let mut out = String::from("Optcode\n");
+    for (i, optimization) in codes.iter().enumerate() {
+        if i % 5 == 0 {
+            out.push_str("   ");
+        }
+        let mode = match optimization {
+            crate::ast::ApoOptimization::Unambiguous => "u",
+            crate::ast::ApoOptimization::Fast => "f",
+            crate::ast::ApoOptimization::Slow => "s",
+        };
+        let suffix = if i + 1 == codes.len() { "" } else { " *" };
+        out.push_str(&format!("{:16}", format!("{mode} {i}{suffix}")));
+        if i % 5 == 4 || i + 1 == codes.len() {
+            out.push('\n');
+        }
+    }
+    out.push_str("   ;");
+    out
 }
 /// expands tree selectors into zero-based tree indices, preserving command order
 /// and removing duplicates.

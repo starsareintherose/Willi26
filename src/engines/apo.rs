@@ -44,7 +44,7 @@ pub fn detect_apomorphic_changes(
     ds: &Dataset,
     cfg: &CharConfig,
     tr: &Tree,
-    optimization: ApoOptimization,
+    optimizations: &[ApoOptimization],
     root_taxon: Option<usize>,
 ) -> Result<Vec<ApoBranchChange>, String> {
     if cfg.len() != ds.nchar {
@@ -52,6 +52,9 @@ pub fn detect_apomorphic_changes(
     }
     if tr.ntax != ds.ntax {
         return Err(format!("tree ntax {} != dataset ntax {}", tr.ntax, ds.ntax));
+    }
+    if optimizations.len() != ds.nchar {
+        return Err(format!("optcode nchar={} != dataset nchar={}", optimizations.len(), ds.nchar));
     }
 
     let descendant_masks = descendant_taxon_masks(tr, ds.ntax)?;
@@ -64,7 +67,8 @@ pub fn detect_apomorphic_changes(
         }
 
         let additive = cfg.chars[ch].additive;
-        for change in detect_character_changes(ds, tr, ch, additive, optimization, root_taxon)? {
+        for change in detect_character_changes(ds, tr, ch, additive, optimizations[ch], root_taxon)?
+        {
             *counts.entry((change.character, change.state_bits)).or_insert(0) += 1;
             raw.push(change);
         }

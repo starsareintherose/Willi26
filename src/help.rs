@@ -32,8 +32,10 @@ static TOPICS: &[HelpTopic] = &[
         details: &[
             "apo n;           show tree n with apomorphy/homoplasy character labels",
             "apo n f;         save tree n as SVG file f with apomorphy/homoplasy markers",
-            "apo+;            same with apo, but fast optimization / ACCTRAN",
-            "apo-;            same with apo, slow optimization / DELTRAN",
+            "optcode;            display character optimization settings",
+            "optcode u|f|s chars; set unambiguous, fast, or slow optimization",
+            "                 chars are 0 1 2.3 or . for all characters",
+            "                 use * for multiple assignments: optcode f . * s 0;",
             "                 black dots are apomorphies; white dots are homoplasies",
             "                 if n is /, last tree is chosen",
         ],

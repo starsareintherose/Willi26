@@ -105,11 +105,11 @@ pub enum Command {
     },
     TTags(TTagsCmd),
     Resample(ResampleCmd),
+    OptCode(OptCodeCmd),
     /// Show or save a tree annotated with apomorphy/homoplasy changes.
     Apo {
         tree: TreeSelector,
         path: Option<PathBuf>,
-        optimization: ApoOptimization,
     },
 
     TChoose(Vec<TreeSelector>),
@@ -184,6 +184,20 @@ pub enum ApoOptimization {
     Fast,
     /// Use slow optimization, equivalent to DELTRAN/delayed transformation.
     Slow,
+}
+
+/// Per-character optimization settings used by apo output.
+#[derive(Debug, Clone)]
+pub enum OptCodeCmd {
+    Query,
+    Apply(Vec<OptCodeOp>),
+}
+
+/// One optimization mode assignment within an optcode command.
+#[derive(Debug, Clone)]
+pub struct OptCodeOp {
+    pub optimization: ApoOptimization,
+    pub chars: CharSel,
 }
 
 /// Help selection: default display, all commands, or filter by prefix.

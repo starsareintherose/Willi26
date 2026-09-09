@@ -67,6 +67,7 @@ pub struct State {
 
     /* character config slots */
     pub char_config: Option<crate::engines::ccode::CharConfig>,
+    pub apo_optimizations: Option<Vec<crate::ast::ApoOptimization>>,
     pub ccode_slots: std::collections::HashMap<u8, crate::engines::ccode::CharConfig>,
 
     /* trees: slot -> TreeSet(title + trees) */
@@ -103,6 +104,7 @@ impl State {
             dataset: None,
             outgroup: None,
             char_config: None,
+            apo_optimizations: None,
             ccode_slots: HashMap::new(),
             current_tree_slot: None,
             tree_slots: HashMap::new(),
