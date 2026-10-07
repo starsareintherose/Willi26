@@ -53,3 +53,9 @@ cargo doc
 ## License
 
 Willi26 is licensed under the GNU Affero General Public License v3.0 or later.
+
+## Sponsor
+
+<a href="https://linux.org.au/"><img src="./logo/linuxaus-transgender.svg" alt="Linux Australia" height="180"></a>
+
+*Thanks to <a href="https://linux.org.au/">Linux Australia</a> for supporting this project.*
