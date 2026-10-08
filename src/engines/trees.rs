@@ -499,15 +499,17 @@ impl Tree {
                 return Ok(cur);
             }
 
-            let nexts: Vec<usize> = neigh[cur].iter().copied().filter(|&x| x != parent).collect();
-
-            if nexts.is_empty() {
-                return Err("empty continuation while rebuilding rooted tree".to_string());
+            /* Traverse adjacency directly without an intermediate neighbour list. */
+            let mut kids = Vec::with_capacity(neigh[cur].len().saturating_sub(1));
+            for &ch in &neigh[cur] {
+                if ch == parent {
+                    continue;
+                }
+                kids.push(build(ch, cur, ntax, neigh, new_tree)?);
             }
 
-            let mut kids = Vec::new();
-            for ch in nexts {
-                kids.push(build(ch, cur, ntax, neigh, new_tree)?);
+            if kids.is_empty() {
+                return Err("empty continuation while rebuilding rooted tree".to_string());
             }
 
             if kids.len() == 1 { Ok(kids[0]) } else { Ok(new_tree.add_internal_node(kids)) }

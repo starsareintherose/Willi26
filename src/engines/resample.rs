@@ -98,13 +98,18 @@ pub fn bootstrap_support(
     };
 
     for rep in 0..replications {
-        let rep_cfg = resampled_config(cfg, ds.nchar, method, 0xa11c_e5eed ^ mix64(rep as u64));
+        let rep_cfg = resampled_config(
+            cfg,
+            ds.nchar,
+            method,
+            0xa11c_e5eed ^ crate::engines::rng::avalanche64(rep as u64),
+        );
         let searched = run_resample_search(
             ds,
             &rep_cfg,
             outgroup,
             search_steps,
-            0x5eed_0000_0000_0001 ^ mix64(rep as u64),
+            0x5eed_0000_0000_0001 ^ crate::engines::rng::avalanche64(rep as u64),
         )?;
         let searched = keep_replicate_optimal_trees(ds, &rep_cfg, searched);
 
@@ -248,7 +253,13 @@ fn run_resample_search(
     for (idx, step) in steps.iter().enumerate() {
         match step {
             ResampleSearchStep::Hennig { star } => {
-                trees = search::hennig(ds, cfg, seed ^ mix64(idx as u64), outgroup).trees;
+                trees = search::hennig(
+                    ds,
+                    cfg,
+                    seed ^ crate::engines::rng::avalanche64(idx as u64),
+                    outgroup,
+                )
+                .trees;
                 if *star {
                     trees = branchswap::branch_break_closure(ds, cfg, &trees, outgroup, None)
                         .map(|(trees, _)| trees)
@@ -260,7 +271,7 @@ fn run_resample_search(
                     ds,
                     cfg,
                     BOOT_SEARCH_REPS,
-                    seed ^ mix64(idx as u64),
+                    seed ^ crate::engines::rng::avalanche64(idx as u64),
                     outgroup,
                     if *star { None } else { Some(BOOT_TREE_LIMIT) },
                 )
@@ -277,7 +288,7 @@ fn run_resample_search(
                         ds,
                         cfg,
                         BOOT_SEARCH_REPS,
-                        seed ^ mix64(idx as u64),
+                        seed ^ crate::engines::rng::avalanche64(idx as u64),
                         outgroup,
                         Some(BOOT_TREE_LIMIT),
                     )
@@ -357,7 +368,7 @@ impl Rng {
 
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        mix64(self.state)
+        crate::engines::rng::avalanche64(self.state)
     }
 
     fn next_usize(&mut self, n: usize) -> usize {
@@ -367,12 +378,4 @@ impl Rng {
     fn next_percent(&mut self) -> f64 {
         (self.next_u64() as f64 / u64::MAX as f64) * 100.0
     }
-}
-
-fn mix64(mut x: u64) -> u64 {
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
 }

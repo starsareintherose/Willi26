@@ -3,31 +3,25 @@ fast TBR side-message scoring, candidate ranking,
 deduplication, and closure search over improved trees.
 
  */
-use std::collections::{BTreeMap, BTreeSet};
-use std::{
-    collections::{HashMap, VecDeque},
-    rc::Rc,
-};
+use std::collections::{HashMap, HashSet};
+use std::{collections::VecDeque, rc::Rc};
 
 use crate::engines::{
     ccode::CharConfig,
     dataset::Dataset,
     search::{
         BinaryView, INF, NSTATES, ScoreWorkspace, collapsed_dedup_hash, merge_bits,
-        min_cost_with_transition, rooted_topology_hash, score_tree, score_tree_bounded,
+        min_cost_with_transition, rooted_topology_hash, score_tree,
     },
     trees::Tree,
     util::{self, is_contiguous},
 };
-/*Tuning constants */
 
-const TBR_EXACT_PER_CUT: usize = 24;
-const TBR_DELTA_SLACK: u64 = 4;
-
-const TBR_CLOSURE_EXACT_PER_CUT: usize = 24;
-const TBR_CLOSURE_DELTA_SLACK: u64 = 4;
-const TBR_TOP_K: usize = 24;
-
+/* Small fast-pass limits.  They affect traversal order only: before a tree is
+declared locally optimal, an uncapped pass verifies the whole TBR
+neighbourhood. */
+const FAST_RECONNECTS_PER_SIDE: usize = 8;
+const FAST_CANDIDATES_PER_CUT: usize = 16;
 /*  Pattern – detect & compress identical character vectors  */
 
 #[derive(Clone, Copy, Debug)]
@@ -206,6 +200,11 @@ impl SideMessageMemo {
     fn put(&mut self, from: usize, blocked: usize, msg: SideMessageRef) {
         let idx = self.idx(from, blocked);
         self.slots[idx] = Some(msg);
+    }
+
+    /// Drops cut-specific values while retaining the allocated dense table.
+    fn clear(&mut self) {
+        self.slots.fill(None);
     }
 }
 /// creates a side message for a terminal taxon.
@@ -397,7 +396,9 @@ fn compute_side_message_memo(
 
 #[derive(Debug, Clone)]
 struct TbrInsertOption {
-    edge: (usize, usize),
+    /* None denotes a one-node (normally terminal) component, which reconnects
+    directly instead of subdividing an edge. */
+    edge: Option<(usize, usize)>,
     reconnect: (usize, usize),
     base_cost: u64,
     a_to_b: SideMessageRef,
@@ -435,6 +436,8 @@ struct TbrSearchContext {
     edges: Vec<(usize, usize)>,
     queue: VecDeque<usize>,
     mark: Vec<u8>,
+    side_memo: SideMessageMemo,
+    build_edges: Vec<(usize, usize)>,
 }
 
 impl TbrSearchContext {
@@ -446,6 +449,8 @@ impl TbrSearchContext {
             edges: tree.undirected_edges(),
             queue: VecDeque::with_capacity(tree.nodes.len()),
             mark: vec![0u8; tree.nodes.len()],
+            side_memo: SideMessageMemo::new(tree.nodes.len()),
+            build_edges: Vec::with_capacity(tree.nodes.len() + 4),
         }
     }
     /// lists undirected edges inside one component after removing the cut edge.
@@ -532,26 +537,51 @@ fn make_tbr_component_info_for_cut(
         return None;
     }
     let (left_edges, right_edges) = ctx.component_edges_after_cut(cut_edge);
-    if left_edges.is_empty() || right_edges.is_empty() {
-        return None;
-    }
-
-    let left_options = make_insert_options_for_component(
-        tree,
-        active,
-        patterns,
-        &ctx.neigh,
-        &left_edges,
-        cut_edge,
-    );
-    let right_options = make_insert_options_for_component(
-        tree,
-        active,
-        patterns,
-        &ctx.neigh,
-        &right_edges,
-        cut_edge,
-    );
+    ctx.side_memo.clear();
+    let left_options = if left_edges.is_empty() {
+        vec![make_singleton_option(
+            tree,
+            active,
+            patterns,
+            &ctx.neigh,
+            &mut ctx.side_memo,
+            cut_edge.0,
+            cut_edge.1,
+            cut_edge,
+        )]
+    } else {
+        make_insert_options_for_component(
+            tree,
+            active,
+            patterns,
+            &ctx.neigh,
+            &mut ctx.side_memo,
+            &left_edges,
+            cut_edge,
+        )
+    };
+    let right_options = if right_edges.is_empty() {
+        vec![make_singleton_option(
+            tree,
+            active,
+            patterns,
+            &ctx.neigh,
+            &mut ctx.side_memo,
+            cut_edge.1,
+            cut_edge.0,
+            cut_edge,
+        )]
+    } else {
+        make_insert_options_for_component(
+            tree,
+            active,
+            patterns,
+            &ctx.neigh,
+            &mut ctx.side_memo,
+            &right_edges,
+            cut_edge,
+        )
+    };
 
     Some(TbrComponentInfo { left_edges, right_edges, left_options, right_options })
 }
@@ -563,28 +593,75 @@ fn make_insert_options_for_component(
     active: &[ActivePattern],
     patterns: &[PatternInfo],
     neigh: &[Vec<usize>],
+    memo: &mut SideMessageMemo,
     component_edges: &[(usize, usize)],
     cut_edge: (usize, usize),
 ) -> Vec<TbrInsertOption> {
     let mut out = Vec::with_capacity(component_edges.len());
-    let mut memo = SideMessageMemo::new(neigh.len());
 
     for &(a, b) in component_edges {
         let edge = sorted_edge(a, b);
-        let a_to_b =
-            compute_side_message_memo(tree, active, patterns, neigh, a, b, cut_edge, &mut memo);
-        let b_to_a =
-            compute_side_message_memo(tree, active, patterns, neigh, b, a, cut_edge, &mut memo);
+        let a_to_b = compute_side_message_memo(tree, active, patterns, neigh, a, b, cut_edge, memo);
+        let b_to_a = compute_side_message_memo(tree, active, patterns, neigh, b, a, cut_edge, memo);
         let base_cost = a_to_b.weighted_len + b_to_a.weighted_len;
 
-        out.push(TbrInsertOption { edge, reconnect: edge, base_cost, a_to_b, b_to_a });
+        out.push(TbrInsertOption { edge: Some(edge), reconnect: edge, base_cost, a_to_b, b_to_a });
     }
     out
 }
 
+/// Builds a reconnection option for a single-node TBR component.
+fn make_singleton_option(
+    tree: &Tree,
+    active: &[ActivePattern],
+    patterns: &[PatternInfo],
+    neigh: &[Vec<usize>],
+    memo: &mut SideMessageMemo,
+    node: usize,
+    blocked: usize,
+    cut_edge: (usize, usize),
+) -> TbrInsertOption {
+    let real =
+        compute_side_message_memo(tree, active, patterns, neigh, node, blocked, cut_edge, memo);
+    let neutral = Rc::new(neutral_side_message(active, patterns));
+    TbrInsertOption {
+        edge: None,
+        reconnect: (node, node),
+        base_cost: real.weighted_len,
+        a_to_b: real,
+        b_to_a: neutral,
+    }
+}
+
+fn neutral_side_message(active: &[ActivePattern], patterns: &[PatternInfo]) -> SideMessage {
+    let infos = active
+        .iter()
+        .map(|ap| match patterns[ap.pattern_id].strategy {
+            AdditiveStrategy::FastRange if ap.additive => SidePatternInfo {
+                raw_len: 0,
+                st: 0,
+                rg: util::AdditiveRange { lo: 0, hi: 35 },
+                costs: None,
+            },
+            AdditiveStrategy::ExactCosts => SidePatternInfo {
+                raw_len: 0,
+                st: 0,
+                rg: util::AdditiveRange::default(),
+                costs: Some(Rc::new([0; NSTATES])),
+            },
+            _ => SidePatternInfo {
+                raw_len: 0,
+                st: crate::engines::dataset::StateSet::ALL36.bits(),
+                rg: util::AdditiveRange::default(),
+                costs: None,
+            },
+        })
+        .collect();
+    SideMessage { infos, weighted_len: 0 }
+}
+
 /*  Candidate scoring */
-/// scores one paired TBR insertion option with an optional cutoff for early
-/// rejection.
+/// Scores a paired TBR reconnection up to `limit`.
 
 fn score_tbr_candidate_limited(
     active: &[ActivePattern],
@@ -643,96 +720,78 @@ fn score_tbr_candidate_limited(
     }
     Some(total)
 }
-/// ranks promising TBR candidates for one cut edge.
-
-fn ranked_candidates_for_cut(
+/// Scores all TBR reconnections that can meet `score_limit`.
+fn exhaustive_candidates_for_cut(
     active: &[ActivePattern],
     patterns: &[PatternInfo],
     info: &TbrComponentInfo,
     score_limit: u64,
-    cap: usize,
-    slack: u64,
 ) -> Vec<TbrRankedCandidate> {
-    let left_indices = top_k_indices_by_base_len(&info.left_options, TBR_TOP_K);
-    let right_indices = top_k_indices_by_base_len(&info.right_options, TBR_TOP_K);
+    let left_indices = sorted_option_indices(&info.left_options, None);
+    let right_indices = sorted_option_indices(&info.right_options, None);
 
-    let mut candidates = Vec::new();
-    /*
-      Keep the loop-pruning limit at the initial score_limit so that a
-      promising pair is not skipped just because we already found a slightly
-      better score from a different pair.
-    */
-    let prune_limit = score_limit;
-    /* Tighter limit for early-exit inside score_tbr_candidate_limited. */
-    let mut candidate_limit = score_limit;
-
-    for &li in &left_indices {
-        let left_opt = &info.left_options[li];
-        let left_base = left_opt.base_len();
-        if left_base > prune_limit {
+    let mut candidates =
+        Vec::with_capacity(info.left_options.len().saturating_mul(info.right_options.len()));
+    for li in left_indices {
+        let left = &info.left_options[li];
+        if left.base_len() > score_limit {
             break;
         }
         for &ri in &right_indices {
-            let right_opt = &info.right_options[ri];
-            let lower_bound = left_base.saturating_add(right_opt.base_len());
-            if lower_bound > prune_limit {
+            let right = &info.right_options[ri];
+            if left.base_len().saturating_add(right.base_len()) > score_limit {
                 break;
             }
-            if let Some(delta) =
-                score_tbr_candidate_limited(active, patterns, left_opt, right_opt, candidate_limit)
+            if let Some(delta_len) =
+                score_tbr_candidate_limited(active, patterns, left, right, score_limit)
             {
-                if delta < candidate_limit {
-                    candidate_limit = delta;
-                }
-                candidates.push(TbrRankedCandidate {
-                    delta_len: delta,
-                    left_idx: li,
-                    right_idx: ri,
-                });
+                candidates.push(TbrRankedCandidate { delta_len, left_idx: li, right_idx: ri });
             }
         }
     }
-
-    candidates.sort_by(|a, b| {
-        a.delta_len
-            .cmp(&b.delta_len)
-            .then_with(|| a.left_idx.cmp(&b.left_idx))
-            .then_with(|| a.right_idx.cmp(&b.right_idx))
-    });
-
-    if candidates.is_empty() {
-        return candidates;
-    }
-
-    let min_delta = candidates[0].delta_len;
-    let max_keep_delta = min_delta.saturating_add(slack);
-    let mut ranked = Vec::with_capacity(cap);
-    for cand in candidates {
-        if ranked.len() >= cap && cand.delta_len > max_keep_delta {
-            break;
-        }
-        ranked.push(cand);
-        if ranked.len() >= cap {
-            break;
-        }
-    }
-    ranked
-}
-/// returns the indices of the lowest base-length insertion options.
-
-fn top_k_indices_by_base_len(options: &[TbrInsertOption], k: usize) -> Vec<usize> {
-    if options.is_empty() {
-        return Vec::new();
-    }
-    let mut indexed: Vec<(usize, u64)> =
-        options.iter().enumerate().map(|(i, opt)| (i, opt.base_len())).collect();
-    let limit = k.min(indexed.len());
-    indexed.select_nth_unstable_by_key(limit - 1, |x| x.1);
-    indexed.truncate(limit);
-    indexed.sort_by_key(|x| x.1);
-    indexed.into_iter().map(|x| x.0).collect()
+    candidates.sort_unstable_by_key(|c| (c.delta_len, c.left_idx, c.right_idx));
+    candidates
 }
 
+/// Returns ranked TBR candidates for the first-improvement pass.
+fn fast_candidates_for_cut(
+    active: &[ActivePattern],
+    patterns: &[PatternInfo],
+    info: &TbrComponentInfo,
+    score_limit: u64,
+) -> Vec<TbrRankedCandidate> {
+    let left = sorted_option_indices(&info.left_options, Some(FAST_RECONNECTS_PER_SIDE));
+    let right = sorted_option_indices(&info.right_options, Some(FAST_RECONNECTS_PER_SIDE));
+
+    let mut out =
+        Vec::with_capacity(left.len().saturating_mul(right.len()).min(FAST_CANDIDATES_PER_CUT));
+    for li in left {
+        for &ri in &right {
+            let l = &info.left_options[li];
+            let r = &info.right_options[ri];
+            if l.base_len().saturating_add(r.base_len()) > score_limit {
+                continue;
+            }
+            if let Some(delta_len) =
+                score_tbr_candidate_limited(active, patterns, l, r, score_limit)
+            {
+                out.push(TbrRankedCandidate { delta_len, left_idx: li, right_idx: ri });
+            }
+        }
+    }
+    out.sort_unstable_by_key(|c| (c.delta_len, c.left_idx, c.right_idx));
+    out.truncate(FAST_CANDIDATES_PER_CUT);
+    out
+}
+
+fn sorted_option_indices(options: &[TbrInsertOption], limit: Option<usize>) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..options.len()).collect();
+    indices.sort_unstable_by_key(|&index| options[index].base_len());
+    if let Some(limit) = limit {
+        indices.truncate(limit);
+    }
+    indices
+}
 /* Public entry points */
 /// repeatedly explores equal/better TBR neighbors until closure.
 
@@ -749,21 +808,38 @@ pub fn branch_break_closure(
       Wagner-built tree to its local optimum gives the subsequent closure
       phase a much richer frontier to explore.
     */
+    let valid_starts: Vec<&Tree> = start_trees.iter().filter(|tr| is_strictly_binary(tr)).collect();
+    let improved: Result<Vec<(Tree, u64)>, String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = valid_starts
+            .iter()
+            .map(|tr| scope.spawn(move || branch_swap_best_tree_tbr_fast(ds, cfg, tr, outgroup)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().map_err(|_| "branch breaking worker panicked".to_string())?)
+            .collect()
+    });
+
     let mut pre_opt: Vec<Tree> = Vec::new();
-    let mut seen_pre = BTreeSet::<u64>::new();
-    let mut ws = ScoreWorkspace::new();
-    for tr in start_trees {
-        if !is_strictly_binary(tr) {
-            continue;
-        }
-        let (improved, _) = branch_swap_best_tree_tbr_fast(ds, cfg, tr, outgroup)?;
-        let h = collapsed_dedup_hash(&improved, ds, cfg, &mut ws);
+    let mut seen_pre = HashSet::<u64>::new();
+    for (improved, _) in improved? {
+        let h = rooted_topology_hash(&improved);
         if seen_pre.insert(h) {
             pre_opt.push(improved);
         }
     }
 
-    branch_break_closure_tbr_fast(ds, cfg, &pre_opt, outgroup, keep_limit)
+    branch_break_closure_tbr_fast(ds, cfg, &pre_opt, outgroup, keep_limit, false)
+}
+
+/// Improves one start tree by TBR and retains one local optimum.
+pub fn branch_swap_one(
+    ds: &Dataset,
+    cfg: &CharConfig,
+    start: &Tree,
+    outgroup: usize,
+) -> Result<(Tree, u64), String> {
+    branch_swap_best_tree_tbr_fast(ds, cfg, start, outgroup)
 }
 
 /*  Fast TBR best-tree search  */
@@ -783,52 +859,68 @@ fn branch_swap_best_tree_tbr_fast(
 
     loop {
         let mut improved = false;
-        let mut ctx = TbrSearchContext::new(&current);
-        let cut_edges = ctx.edges.clone();
 
-        for cut_edge in cut_edges {
-            let Some(info) = make_tbr_component_info_for_cut(
-                &current,
-                &active_patterns,
-                &patterns,
-                outgroup,
-                &mut ctx,
-                cut_edge,
-            ) else {
-                continue;
-            };
-
-            let ranked = ranked_candidates_for_cut(
-                &active_patterns,
-                &patterns,
-                &info,
-                current_len.saturating_sub(1),
-                TBR_EXACT_PER_CUT,
-                TBR_DELTA_SLACK,
-            );
-            if ranked.is_empty() {
-                continue;
-            }
-
-            let best = &ranked[0];
-            if best.delta_len < current_len {
-                let left_opt = &info.left_options[best.left_idx];
-                let right_opt = &info.right_options[best.right_idx];
-                let cand_tree = match build_tbr_tree_from_options(
-                    &current, outgroup, &info, left_opt, right_opt,
-                ) {
-                    Ok(t) if is_strictly_binary(&t) => t,
-                    _ => continue,
+        /* Two passes: a small first-improvement pass, followed only when
+        necessary by an exhaustive proof that no improving reconnect was
+        omitted by the fast ranking. */
+        for exhaustive in [false, true] {
+            let mut ctx = TbrSearchContext::new(&current);
+            let cut_edges = ctx.edges.clone();
+            for cut_edge in cut_edges {
+                let Some(info) = make_tbr_component_info_for_cut(
+                    &current,
+                    &active_patterns,
+                    &patterns,
+                    outgroup,
+                    &mut ctx,
+                    cut_edge,
+                ) else {
+                    continue;
                 };
-                match score_tree_bounded(ds, cfg, &cand_tree, &mut score_ws, current_len) {
-                    Some(len) if len < current_len => {
-                        current = normalize_tree(&cand_tree, outgroup);
+
+                let limit = current_len.saturating_sub(1);
+                let ranked = if exhaustive {
+                    exhaustive_candidates_for_cut(&active_patterns, &patterns, &info, limit)
+                } else {
+                    fast_candidates_for_cut(&active_patterns, &patterns, &info, limit)
+                };
+                if ranked.is_empty() {
+                    continue;
+                }
+
+                for best in &ranked {
+                    let left_opt = &info.left_options[best.left_idx];
+                    let right_opt = &info.right_options[best.right_idx];
+                    let cand_tree = match build_tbr_tree_from_options(
+                        &current,
+                        outgroup,
+                        &info,
+                        left_opt,
+                        right_opt,
+                        &mut ctx.build_edges,
+                    ) {
+                        Ok(t) if is_strictly_binary(&t) => t,
+                        _ => continue,
+                    };
+                    let len = best.delta_len;
+                    #[cfg(debug_assertions)]
+                    {
+                        let checked = score_tree(ds, cfg, &cand_tree, &mut score_ws);
+                        debug_assert_eq!(len, checked, "indirect TBR score mismatch");
+                    }
+                    if len < current_len {
+                        current = canonicalize_outgrouped_candidate(cand_tree);
                         current_len = len;
                         improved = true;
                         break;
                     }
-                    _ => {}
                 }
+                if improved {
+                    break;
+                }
+            }
+            if improved {
+                break;
             }
         }
 
@@ -848,30 +940,30 @@ fn branch_break_closure_tbr_fast(
     start_trees: &[Tree],
     outgroup: usize,
     keep_limit: Option<usize>,
+    collapsed_frontier: bool,
 ) -> Result<(Vec<Tree>, u64), String> {
     let (active_patterns, patterns) = build_active_patterns(ds, cfg);
     let mut score_ws = ScoreWorkspace::new();
 
     let mut best_len = u64::MAX;
-    let mut best_seen = BTreeSet::<u64>::new();
+    let mut best_seen = HashSet::<u64>::new();
     let mut best_trees = Vec::<Tree>::new();
-    let mut frontier_seen = BTreeSet::<u64>::new();
+    /* Binary resolutions with the same collapsed report can have different
+    improving TBR paths, so frontier identity must remain rooted/binary. */
+    let mut frontier_seen = HashSet::<u64>::new();
     let mut frontier = Vec::<Tree>::new();
-    let mut exact_len_cache = BTreeMap::<u64, u64>::new();
-    let mut rooted_seen = BTreeSet::<u64>::new();
+    let mut rooted_seen = HashSet::<u64>::new();
     for tr in start_trees {
         if !is_strictly_binary(tr) {
             continue;
         }
         let norm = normalize_tree(tr, outgroup);
-        /* Use collapsed hash for dedup, rooted hash for score cache. */
         let h_coll = collapsed_dedup_hash(&norm, ds, cfg, &mut score_ws);
         let h_root = rooted_topology_hash(&norm);
-        if !frontier_seen.insert(h_coll) {
+        if !frontier_seen.insert(h_root) {
             continue;
         }
         let len = score_tree(ds, cfg, &norm, &mut score_ws);
-        exact_len_cache.insert(h_root, len);
 
         if len < best_len {
             best_len = len;
@@ -882,7 +974,7 @@ fn branch_break_closure_tbr_fast(
             rooted_seen.clear();
 
             best_seen.insert(h_coll);
-            frontier_seen.insert(h_coll);
+            frontier_seen.insert(h_root);
             best_trees.push(norm.clone());
             frontier.push(norm);
 
@@ -931,14 +1023,11 @@ fn branch_break_closure_tbr_fast(
                     continue;
                 };
 
-                let ranked = ranked_candidates_for_cut(
-                    &active_patterns,
-                    &patterns,
-                    &info,
-                    best_len,
-                    TBR_CLOSURE_EXACT_PER_CUT,
-                    TBR_CLOSURE_DELTA_SLACK,
-                );
+                /* Both commands traverse the complete equal-tree closure.
+                `bb` stops only after its 100-tree buffer fills; `bb*`
+                removes that storage limit. */
+                let ranked =
+                    exhaustive_candidates_for_cut(&active_patterns, &patterns, &info, best_len);
 
                 for rc in &ranked {
                     if buffer_full {
@@ -950,14 +1039,19 @@ fn branch_break_closure_tbr_fast(
                     }
                     let left_opt = &info.left_options[rc.left_idx];
                     let right_opt = &info.right_options[rc.right_idx];
-                    let cand_tree =
-                        match build_tbr_tree_from_options(tr, outgroup, &info, left_opt, right_opt)
-                        {
-                            Ok(t) if is_strictly_binary(&t) => t,
-                            _ => continue,
-                        };
-                    let norm = normalize_tree(&cand_tree, outgroup);
-                    let h_root = rooted_topology_hash(&norm);
+                    let cand_tree = match build_tbr_tree_from_options(
+                        tr,
+                        outgroup,
+                        &info,
+                        left_opt,
+                        right_opt,
+                        &mut ctx.build_edges,
+                    ) {
+                        Ok(t) if is_strictly_binary(&t) => t,
+                        _ => continue,
+                    };
+                    /* Deduplicate and score before canonical child sorting. */
+                    let h_root = rooted_topology_hash(&cand_tree);
 
                     /*
                       Cheap rooted-hash prefilter: skip if this binary topology
@@ -967,28 +1061,22 @@ fn branch_break_closure_tbr_fast(
                         continue;
                     }
 
-                    let exact_len = if delta < best_len {
-                        delta
-                    } else {
-                        /* delta == best_len — verify with full score (cache for speed). */
-                        match exact_len_cache.get(&h_root) {
-                            Some(&len) => len,
-                            None => {
-                                let len = score_tree(ds, cfg, &norm, &mut score_ws);
-                                exact_len_cache.insert(h_root, len);
-                                len
-                            }
-                        }
-                    };
+                    /* The side-message calculation is the exact indirect TBR
+                    length: fixed component lengths plus reconnect cost.
+                    Debug builds cross-check it with a full down-pass; release
+                    builds avoid that O(T*C) duplicate work. */
+                    let exact_len = rc.delta_len;
+                    #[cfg(debug_assertions)]
+                    {
+                        let checked = score_tree(ds, cfg, &cand_tree, &mut score_ws);
+                        debug_assert_eq!(exact_len, checked, "indirect TBR score mismatch");
+                    }
 
                     if exact_len > best_len {
                         continue;
                     }
 
-                    /*
-                      Dual representation: collapsed hash for dedup only after
-                      the candidate is known to be score-relevant.
-                    */
+                    let norm = canonicalize_outgrouped_candidate(cand_tree);
                     let h_coll = collapsed_dedup_hash(&norm, ds, cfg, &mut score_ws);
 
                     if exact_len < best_len {
@@ -1002,7 +1090,7 @@ fn branch_break_closure_tbr_fast(
 
                         best_seen.insert(h_coll);
                         best_trees.push(norm.clone());
-                        frontier_seen.insert(h_coll);
+                        frontier_seen.insert(h_root);
                         next_frontier.push(norm);
                         new_found = true;
 
@@ -1021,7 +1109,7 @@ fn branch_break_closure_tbr_fast(
                             buffer_full = true;
                         }
                     }
-                    if frontier_seen.insert(h_coll) {
+                    if frontier_seen.insert(h_root) {
                         next_frontier.push(norm);
                         useful = true;
                     }
@@ -1044,6 +1132,18 @@ fn branch_break_closure_tbr_fast(
         }
     }
 
+    /* First pass preserves every rooted binary route that may improve TL.
+    Once it has finished, bounded bb may use a collapsed-MPT frontier only
+    to collect additional equal-length reported trees up to its 100 slots.
+    This cannot discard a shorter route already considered by the first
+    pass; if a shorter tree is nevertheless found, it is adopted. */
+    if !collapsed_frontier
+        && keep_limit.is_some()
+        && !best_buffer_full(best_trees.len(), keep_limit)
+    {
+        return branch_break_closure_tbr_fast(ds, cfg, &best_trees, outgroup, keep_limit, true);
+    }
+
     Ok((best_trees, best_len))
 }
 /// constructs a TBR candidate from two ranked component insertion options.
@@ -1054,30 +1154,46 @@ fn build_tbr_tree_from_options(
     info: &TbrComponentInfo,
     left_opt: &TbrInsertOption,
     right_opt: &TbrInsertOption,
+    edges: &mut Vec<(usize, usize)>,
 ) -> Result<Tree, String> {
-    let mut edges = Vec::with_capacity(info.left_edges.len() + info.right_edges.len() + 5);
+    edges.clear();
+    edges.reserve(
+        (info.left_edges.len() + info.right_edges.len() + 5).saturating_sub(edges.capacity()),
+    );
     for &e in &info.left_edges {
-        if e != left_opt.edge {
+        if Some(e) != left_opt.edge {
             edges.push(e);
         }
     }
     for &e in &info.right_edges {
-        if e != right_opt.edge {
+        if Some(e) != right_opt.edge {
             edges.push(e);
         }
     }
-    let left_new = next_internal_node_id(&edges, tree.ntax);
-    let right_new = left_new + 1;
-    let (la, lb) = left_opt.reconnect;
-    let (ra, rb) = right_opt.reconnect;
-    edges.push(sorted_edge(la, left_new));
-    edges.push(sorted_edge(lb, left_new));
-    edges.push(sorted_edge(ra, right_new));
-    edges.push(sorted_edge(rb, right_new));
-    edges.push(sorted_edge(left_new, right_new));
+    let mut next = next_internal_node_id(edges, tree.ntax);
+    let left_anchor = if left_opt.edge.is_some() {
+        let id = next;
+        next += 1;
+        let (a, b) = left_opt.reconnect;
+        edges.push(sorted_edge(a, id));
+        edges.push(sorted_edge(b, id));
+        id
+    } else {
+        left_opt.reconnect.0
+    };
+    let right_anchor = if right_opt.edge.is_some() {
+        let id = next;
+        let (a, b) = right_opt.reconnect;
+        edges.push(sorted_edge(a, id));
+        edges.push(sorted_edge(b, id));
+        id
+    } else {
+        right_opt.reconnect.0
+    };
+    edges.push(sorted_edge(left_anchor, right_anchor));
     edges.sort_unstable();
     edges.dedup();
-    Tree::from_undirected_edges_with_outgroup(tree.ntax, &edges, outgroup)
+    Tree::from_undirected_edges_with_outgroup(tree.ntax, edges, outgroup)
 }
 
 /* Helpers  */
@@ -1087,6 +1203,13 @@ fn normalize_tree(tree: &Tree, outgroup: usize) -> Tree {
     let mut norm = tree.reroot_by_outgroup(outgroup).unwrap_or_else(|_| tree.clone());
     norm.canonicalize();
     norm
+}
+
+/// TBR candidate construction already roots on the chosen outgroup; avoid a
+/// redundant full reroot before deterministic child ordering.
+fn canonicalize_outgrouped_candidate(mut tree: Tree) -> Tree {
+    tree.canonicalize();
+    tree
 }
 /// tests whether every internal node has exactly two children.
 

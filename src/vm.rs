@@ -821,11 +821,9 @@ impl Vm {
                 let outgroup = 0usize;
                 let mut ws = crate::engines::search::ScoreWorkspace::new();
 
-                /*
-                  Score all working trees and keep near-best starting trees
-                  within a slack to give TBR closure more diversity.
-                */
-                const BB_START_SLACK: u64 = 5;
+                /* Score all working trees. Branch breaking must retain every
+                supplied random start because a longer Wagner tree may lead
+                to a shorter TBR island. */
                 let mut start_best_len = u64::MAX;
                 let mut start_bucket: Vec<crate::engines::trees::Tree> = Vec::new();
 
@@ -835,11 +833,8 @@ impl Vm {
 
                     if len < start_best_len {
                         start_best_len = len;
-                        start_bucket.clear();
-                        start_bucket.push(norm);
-                    } else if len <= start_best_len + BB_START_SLACK {
-                        start_bucket.push(norm);
                     }
+                    start_bucket.push(norm);
                 }
 
                 /* Canonicalize and deduplicate the starting bucket. */
@@ -1974,7 +1969,7 @@ impl Vm {
                         }
 
                         crate::ast::XStepsMode::W => {
-                            let (ds_nchar, last_tree) = {
+                            let (ds_nchar, trees) = {
                                 let ds = self.state.dataset.as_ref().ok_or_else(|| {
                                     Error::runtime("xsteps w dataset not loaded", None, Some(span))
                                 })?;
@@ -1987,21 +1982,28 @@ impl Vm {
                                     )
                                 })?;
 
-                                let tr = ts.trees.last().cloned().ok_or_else(|| {
-                                    Error::runtime(
+                                if ts.trees.is_empty() {
+                                    return Err(Error::runtime(
                                         "xsteps w working tree set 0 is empty",
                                         None,
                                         Some(span),
-                                    )
-                                })?;
+                                    ));
+                                }
 
-                                (ds.nchar, tr)
+                                (ds.nchar, ts.trees.clone())
                             };
 
                             let rows = {
                                 let ds = self.state.dataset.as_ref().unwrap();
-                                crate::engines::xsteps::successive_weights_rc10_from_tree(
-                                    ds, &last_tree,
+                                let cfg = self.state.char_config.as_ref().ok_or_else(|| {
+                                    Error::runtime(
+                                        "xsteps w char config not loaded",
+                                        None,
+                                        Some(span),
+                                    )
+                                })?;
+                                crate::engines::xsteps::successive_weights_rc10_from_trees(
+                                    ds, cfg, &trees,
                                 )
                                 .map_err(|m| {
                                     Error::runtime(

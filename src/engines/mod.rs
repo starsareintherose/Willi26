@@ -16,6 +16,8 @@ pub mod dataset;
 pub mod ie;
 /// Bootstrap/jackknife-style resampling support calculations.
 pub mod resample;
+/// Deterministic random-number mixing.
+pub(crate) mod rng;
 /// Core parsimony search: Wagner trees, scoring, topology hashing, branch
 /// collapse.
 pub mod search;
@@ -34,8 +36,8 @@ pub mod xx;
 use crate::error::Result;
 
 const TREE_BUFFER_LIMIT: usize = 100;
-const MHENNIG_REPS_NONSTAR: usize = 500;
-const MHENNIG_REPS_STAR: usize = 1000;
+/* Number of random-addition replicates used by multiple Hennig searches. */
+const MHENNIG_REPS: usize = 10;
 
 /// Stateless engine facade implementing legacy command dispatch for search,
 /// consensus, and enumeration.
@@ -77,34 +79,70 @@ impl Engine {
             ));
         }
 
-        let initial = if !multi {
-            search::hennig(ds, cfg, 0x1234_5678_9abc_def0, outgroup)
-        } else {
-            let reps = if star { MHENNIG_REPS_STAR } else { MHENNIG_REPS_NONSTAR };
-            let keep_limit = if star { None } else { Some(TREE_BUFFER_LIMIT) };
-            search::mhennig_limited(ds, cfg, reps, 0x3141_5926_5358_9793, outgroup, keep_limit)
-        };
-
+        /* Interactive Hennig searches use the reproducible seed sequence rooted
+        at 42. Resampling paths may still pass their own explicit seeds. */
+        let seed = search::entropy_seed();
         if !star {
-            return Ok(initial);
+            return Ok(if !multi {
+                search::hennig(ds, cfg, seed, outgroup)
+            } else {
+                search::mhennig_limited(
+                    ds,
+                    cfg,
+                    MHENNIG_REPS,
+                    seed,
+                    outgroup,
+                    Some(TREE_BUFFER_LIMIT),
+                )
+            });
         }
 
-        /*
-          Star mode: run full branch-breaking closure (bb*) on the Wagner
-          trees, including TBR pre-optimisation and collapse-aware dedup.
-          This makes h* = h + bb* and mh* = mh + bb*.
-        */
-        let keep_limit = None; /* bb*: unlimited tree buffer */
-        let (trees, best_len) =
-            branchswap::branch_break_closure(ds, cfg, &initial.trees, outgroup, keep_limit)
-                .map_err(|m| crate::error::Error::runtime(m, None, None))?;
+        /* Star Hennig swaps every random Wagner start independently, retaining
+        one local optimum from each start before selecting the shortest
+        results. */
+        let reps = if multi { MHENNIG_REPS } else { 1 };
+        let starts: Vec<crate::engines::trees::Tree> = (0..reps)
+            .map(|rep| {
+                let rep_seed = if rep == 0 { seed } else { search::entropy_seed() };
+                search::hennig(ds, cfg, rep_seed, outgroup).trees.remove(0)
+            })
+            .collect();
 
-        let min_len = search::minsteps_sum(ds, cfg);
-        let max_len = search::maxsteps_sum(ds, cfg);
-        let ci = search::calc_ci(min_len, best_len);
-        let ri = search::calc_ri(min_len, max_len, best_len);
+        /* Independent starts can be swapped concurrently without cloning the
+        immutable dataset or character configuration. */
+        let swapped: std::result::Result<Vec<_>, String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = starts
+                .iter()
+                .map(|start| {
+                    scope.spawn(move || branchswap::branch_swap_one(ds, cfg, start, outgroup))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().map_err(|_| "mhennig*: TBR worker panicked".to_string())?)
+                .collect()
+        });
+        let swapped = swapped.map_err(|m| crate::error::Error::runtime(m, None, None))?;
 
-        Ok(search::SearchOutcome { trees, best_len, ci, ri })
+        let mut trees = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut best_len = u64::MAX;
+        for (mut tree, len) in swapped {
+            tree.canonicalize();
+            if len < best_len {
+                best_len = len;
+                trees.clear();
+                seen.clear();
+            }
+            if len == best_len {
+                let key = tree.to_storage_string();
+                if seen.insert(key) {
+                    trees.push(tree);
+                }
+            }
+        }
+
+        Ok(search::search_outcome(ds, cfg, trees, best_len))
     }
     /// runs branch-breaking closure from the current tree set using TBR and the
     /// requested tree-buffer policy.

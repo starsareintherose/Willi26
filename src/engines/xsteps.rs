@@ -17,6 +17,13 @@ pub struct TreeLengthRow {
     pub length: u64,
 }
 
+/// Computes whole-tree CI and RI from the active character configuration.
+pub(crate) fn fit_statistics(ds: &Dataset, cfg: &CharConfig, length: u64) -> (f64, Option<f64>) {
+    let min_len = minsteps_sum(ds, cfg);
+    let max_len = maxsteps_sum(ds, cfg);
+    (calc_ci(min_len, length), calc_ri(min_len, max_len, length))
+}
+
 /// Per-character fit statistics: steps, CI, RI for one tree.
 #[derive(Debug, Clone)]
 pub struct CharacterFitRow {
@@ -86,10 +93,7 @@ pub fn analyze_character_fits(
         let rows = analyze_tree_character_fits(ds, cfg, tr)?;
         let length: u64 = rows.iter().map(|r| r.steps).sum();
 
-        let min_len = minsteps_sum(ds, cfg);
-        let max_len = maxsteps_sum(ds, cfg);
-        let ci = calc_ci(min_len, length);
-        let ri = calc_ri(min_len, max_len, length);
+        let (ci, ri) = fit_statistics(ds, cfg, length);
 
         out.push(TreeCharacterReport { tree_index, length, ci, ri, rows });
     }

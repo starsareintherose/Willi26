@@ -15,6 +15,13 @@ pub const NSTATES: usize = 36;
 /// Sentinel infinity value for additive DP cost arrays.
 pub const INF: u64 = u64::MAX / 8;
 
+/// Returns a deterministic seed sequence rooted at 42.
+pub fn entropy_seed() -> u64 {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::engines::rng::splitmix64(42 ^ crate::engines::rng::splitmix64(nonce))
+}
+
 /* Fitch merge */
 /// Non-additive (Fitch) merge of two state sets.
 ///
@@ -34,6 +41,17 @@ pub struct SearchOutcome {
     pub best_len: u64,
     pub ci: f64,
     pub ri: Option<f64>,
+}
+
+/// Builds search statistics for a scored tree set.
+pub(crate) fn search_outcome(
+    ds: &Dataset,
+    cfg: &CharConfig,
+    trees: Vec<Tree>,
+    best_len: u64,
+) -> SearchOutcome {
+    let (ci, ri) = crate::engines::xsteps::fit_statistics(ds, cfg, best_len);
+    SearchOutcome { trees, best_len, ci, ri }
 }
 
 #[derive(Debug, Clone)]
@@ -246,12 +264,7 @@ pub fn hennig(ds: &Dataset, cfg: &CharConfig, seed: u64, outgroup: usize) -> Sea
     tree.canonicalize();
 
     let best_len = score_tree(ds, cfg, &tree, &mut ws);
-    let min_len = minsteps_sum(ds, cfg);
-    let max_len = maxsteps_sum(ds, cfg);
-    let ci = calc_ci(min_len, best_len);
-    let ri = calc_ri(min_len, max_len, best_len);
-
-    SearchOutcome { trees: vec![tree], best_len, ci, ri }
+    search_outcome(ds, cfg, vec![tree], best_len)
 }
 /// runs repeated Wagner starts with optional best-tree buffer limiting for
 /// legacy non-star behavior.
@@ -269,10 +282,8 @@ pub fn mhennig_limited(
     let mut best_trees: Vec<Tree> = Vec::new();
     let mut ws = ScoreWorkspace::new();
 
-    const MHENNIG_SLACK: u64 = 2;
-
     for i in 0..reps {
-        let seed = seed0 ^ mix64(i as u64);
+        let seed = seed0 ^ crate::engines::rng::splitmix64(i as u64);
         let mut tr = hennig_once_tree(ds, cfg, seed, outgroup);
         let len = score_tree(ds, cfg, &tr, &mut ws);
 
@@ -281,26 +292,19 @@ pub fn mhennig_limited(
 
         if len < best_len {
             best_len = len;
-            best_keys.clear();
-            best_trees.clear();
-            best_keys.insert(key);
-            best_trees.push(tr);
-        } else if len <= best_len + MHENNIG_SLACK {
-            if best_keys.insert(key) {
-                let can_keep = keep_limit.map(|lim| best_trees.len() < lim).unwrap_or(true);
-                if can_keep {
-                    best_trees.push(tr);
-                }
+        }
+
+        /* Keep diverse random starts, not only the shortest Wagner trees.
+        A longer addition tree can lead to a better TBR island. */
+        if best_keys.insert(key) {
+            let can_keep = keep_limit.map(|lim| best_trees.len() < lim).unwrap_or(true);
+            if can_keep {
+                best_trees.push(tr);
             }
         }
     }
 
-    let min_len = minsteps_sum(ds, cfg);
-    let max_len = maxsteps_sum(ds, cfg);
-    let ci = calc_ci(min_len, best_len);
-    let ri = calc_ri(min_len, max_len, best_len);
-
-    SearchOutcome { trees: best_trees, best_len, ci, ri }
+    search_outcome(ds, cfg, best_trees, best_len)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -998,8 +1002,6 @@ fn score_insert_candidate_wagner_with_path(
 
 /* hennig core */
 
-const WAGNER_MIN_EXACT_EDGES: usize = 24;
-const WAGNER_CHEAP_WINDOW: u64 = 2;
 const WAGNER_VALIDATE_CACHE: bool = false;
 /// constructs one complete Wagner tree from a deterministic taxon order and
 /// best insertion edges.
@@ -1032,19 +1034,10 @@ fn hennig_once_tree(ds: &Dataset, cfg: &CharConfig, seed: u64, outgroup: usize) 
 
         ranked_edges.sort_by(|a, b| a.1.cmp(&b.1));
 
-        let cheap_best = ranked_edges.first().map(|x| x.1).unwrap_or(0);
-
         let mut best_score = u64::MAX;
         let mut best_edges = Vec::<(usize, usize)>::new();
 
-        for (i, &((parent, child), cheap)) in ranked_edges.iter().enumerate() {
-            if i >= WAGNER_MIN_EXACT_EDGES
-                && cheap > cheap_best.saturating_add(WAGNER_CHEAP_WINDOW)
-                && !best_edges.is_empty()
-            {
-                break;
-            }
-
+        for &((parent, child), _cheap) in &ranked_edges {
             fill_path_to_root(&tr, parent, &mut path_buf);
 
             let s = score_insert_candidate_wagner_with_path(
@@ -1249,98 +1242,6 @@ pub(crate) fn score_tree(
     total
 }
 
-pub(crate) fn score_tree_bounded(
-    ds: &Dataset,
-    cfg: &CharConfig,
-    tree: &Tree,
-    ws: &mut ScoreWorkspace,
-    limit: u64,
-) -> Option<u64> {
-    ws.prepare(tree, ds.nchar);
-    ws.ensure_leaf_cache(ds);
-    ws.ensure_groups(ds, cfg);
-
-    let nchar = ds.nchar;
-    let mut total: u64 = 0;
-
-    let n_groups = ws.char_groups.len();
-    for gi in 0..n_groups {
-        let group_additive = ws.char_groups[gi].additive;
-        let rep = ws.char_groups[gi].chars[0];
-        let total_weight = ws.char_groups[gi].total_weight;
-
-        if !group_additive {
-            let mut steps: u64 = 0;
-
-            for (i, node) in tree.nodes.iter().enumerate() {
-                if let Some(t) = node.taxon {
-                    ws.st[i] = ws.leaf_bits[t * nchar + rep];
-                }
-            }
-
-            for &v in &ws.post {
-                let node = &tree.nodes[v];
-                if node.taxon.is_some() {
-                    continue;
-                }
-
-                let mut iter = node.children.iter().copied();
-                let first = iter.next().expect("internal node must have children");
-                let mut acc = ws.st[first];
-
-                for ch in iter {
-                    let b = ws.st[ch];
-                    let (merged, step) = merge_bits(acc, b);
-                    acc = merged;
-                    steps += step;
-                }
-
-                ws.st[v] = acc;
-            }
-
-            let weighted = steps * total_weight;
-            ws.char_steps[rep] = weighted;
-            total = total.saturating_add(weighted);
-        } else if ws.char_groups[gi].all_contiguous {
-            let mut steps = 0u64;
-            for (i, node) in tree.nodes.iter().enumerate() {
-                if let Some(t) = node.taxon {
-                    ws.rg[i] = ws.leaf_rg[t * nchar + rep];
-                }
-            }
-            for &v in &ws.post {
-                let node = &tree.nodes[v];
-                if node.taxon.is_some() {
-                    continue;
-                }
-                let mut iter = node.children.iter().copied();
-                let first = iter.next().expect("internal node must have children");
-                let mut acc = ws.rg[first];
-                for ch in iter {
-                    let (merged, gap) = acc.merge(ws.rg[ch]);
-                    acc = merged;
-                    steps += gap;
-                }
-                ws.rg[v] = acc;
-            }
-            let weighted = steps * total_weight;
-            ws.char_steps[rep] = weighted;
-            total = total.saturating_add(weighted);
-        } else {
-            let steps =
-                sankoff_ordered_char_steps_fast(ds, tree, rep, &ws.post, &mut ws.sankoff_costs);
-            let weighted = steps * total_weight;
-            ws.char_steps[rep] = weighted;
-            total = total.saturating_add(weighted);
-        }
-
-        if total > limit {
-            return None;
-        }
-    }
-
-    Some(total)
-}
 /// applies ordered-state transition costs to a cost vector for Sankoff
 /// scoring.
 #[inline(always)]
@@ -1641,13 +1542,6 @@ impl Rng {
     }
 }
 /// scrambles seeds and iteration counters into reproducible start seeds.
-
-fn mix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct BinaryView {
