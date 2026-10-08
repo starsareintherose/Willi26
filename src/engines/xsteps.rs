@@ -524,49 +524,52 @@ pub fn character_min_max_steps(ds: &Dataset) -> Vec<CharMinMaxRow> {
     out
 }
 
-/// Successive-weighting result: character, RC value, and rc10 bucket.
+/// Successive-weighting result: character and its integer rc10 bucket.
 #[derive(Debug, Clone)]
 pub struct SaWeightRow {
     pub character: usize,
-    pub rc10: u32, /* 0/1/3/10 (Hennig86-style bucket) */
+    pub rc10: u32,
 }
-/// computes Hennig86-style RC and rc10 weights from one diagnosed tree.
-
-pub fn successive_weights_rc10_from_tree(
+/// Computes successive weights across every supplied MPT. Each character's RC
+/// is diagnosed independently on every tree, then the arithmetic mean RC is
+/// converted to the rc10 bucket.
+pub fn successive_weights_rc10_from_trees(
     ds: &crate::engines::dataset::Dataset,
-    tr: &crate::engines::trees::Tree,
+    cfg: &crate::engines::ccode::CharConfig,
+    trees: &[crate::engines::trees::Tree],
 ) -> Result<Vec<SaWeightRow>, String> {
     if ds.nchar == 0 {
         return Err("xsteps w: dataset has 0 characters".to_string());
+    }
+    if trees.is_empty() {
+        return Err("xsteps w: tree set is empty".to_string());
+    }
+    if cfg.len() != ds.nchar {
+        return Err(format!("xsteps w: ccode length {} != dataset nchar {}", cfg.len(), ds.nchar));
     }
 
     let mut rows = Vec::with_capacity(ds.nchar);
 
     for ch in 0..ds.nchar {
-        let analyzed = analyze_single_character(ds, tr, ch)?;
-        let steps = analyzed.steps;
+        let setting = CharSetting { active: true, additive: cfg.chars[ch].additive, weight: 1 };
+        let min_s = minsteps_char_with_setting(ds, ch, setting);
+        let max_s = maxsteps_char_with_setting(ds, ch, setting);
+        let mut rc_sum = 0.0;
 
-        let min_s = minsteps_char(ds, ch);
-        let max_s = maxsteps_char(ds, ch);
+        for tr in trees {
+            let steps = analyze_single_character_with_setting(ds, tr, ch, setting)?.steps;
+            let ci = if steps == 0 { 1.0 } else { (min_s as f64) / (steps as f64) };
+            let ri = if max_s > min_s {
+                (max_s.saturating_sub(steps)) as f64 / (max_s - min_s) as f64
+            } else {
+                /* Undefined RI receives full credit, preserving prior behavior. */
+                1.0
+            };
+            rc_sum += ci * ri;
+        }
 
-        /* CI: min/obs (obs==0 => treat as perfect) */
-        let ci = if steps == 0 { 1.0 } else { (min_s as f64) / (steps as f64) };
-
-        /* RI: (max-obs)/(max-min), if defined; NA if max==min */
-        let ri = if max_s > min_s {
-            Some((max_s.saturating_sub(steps)) as f64 / (max_s - min_s) as f64)
-        } else {
-            None
-        };
-
-        /*
-          Hennig86 behavior guess:
-          RI=NA => treat as 1.0 (full credit)
-        */
-        let ri_eff = ri.unwrap_or(1.0);
-
-        let rc = ci * ri_eff;
-        let rc10 = rc_to_rc10_floor(rc);
+        let mean_rc = rc_sum / trees.len() as f64;
+        let rc10 = rc_to_rc10_floor(mean_rc);
 
         rows.push(SaWeightRow { character: ch, rc10 });
     }
