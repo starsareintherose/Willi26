@@ -1215,7 +1215,8 @@ fn preview(s: &str) -> String {
 fn normalize_cmd_name(name: &str) -> &str {
     let n = name.to_ascii_lowercase();
     match n.as_str() {
-        "z" | "zz" | "zzz" => return "yama",
+        "z" | "zz" | "zzz" | "quit" | "exit" => return "yama",
+        "help" => return "assist",
         _ => {}
     }
     /* (canonical, min_prefix_len) */

@@ -32,10 +32,6 @@ static TOPICS: &[HelpTopic] = &[
         details: &[
             "apo n;           show tree n with apomorphy/homoplasy character labels",
             "apo n f;         save tree n as SVG file f with apomorphy/homoplasy markers",
-            "optcode;            display character optimization settings",
-            "optcode u|f|s chars; set unambiguous, fast, or slow optimization",
-            "                 chars are 0 1 2.3 or . for all characters",
-            "                 use * for multiple assignments: optcode f . * s 0;",
             "                 black dots are apomorphies; white dots are homoplasies",
             "                 if n is /, last tree is chosen",
         ],
@@ -153,17 +149,27 @@ static TOPICS: &[HelpTopic] = &[
         ],
     },
     HelpTopic {
-        name: "nelsen",
-        summary: "calculate nelson consensus tree",
-        details: &["nelsen;         calculate nelson consensus tree"],
-    },
-    HelpTopic {
         name: "naked",
         summary: "show or hide tree node labels",
         details: &[
             "naked;         show node-label display status",
             "naked =;       hide tree node labels (default)",
             "naked -;       show tree node labels in tplot/ttags SVG",
+        ],
+    },
+    HelpTopic {
+        name: "nelsen",
+        summary: "calculate nelson consensus tree",
+        details: &["nelsen;         calculate nelson consensus tree"],
+    },
+    HelpTopic {
+        name: "optcode",
+        summary: "control character optimization settings",
+        details: &[
+            "optcode;            display character optimization settings",
+            "optcode u|f|s chars; set unambiguous, fast, or slow optimization",
+            "                 chars are 0 1 2.3 or . for all characters",
+            "                 use * for multiple assignments: optcode f . * s 0;",
         ],
     },
     HelpTopic {

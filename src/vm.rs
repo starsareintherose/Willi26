@@ -22,13 +22,12 @@ use crate::{
 };
 
 const ASSIST_CMD_LIST: &str = "\
-apo       assist    batch     bb        bytes     ccode     cget      optcode\n\
+apo       assist    batch     bb        bytes     ccode     cget\n\
 ckeep     display   erase     files     get       hennig    ie\n\
-keep      log       mhennig   naked     nelsen    outgroup  procedure\n\
-quote     reroot    resample  steps     tchoose   tlist     tplot\n\
-tread     tsave     tsvg      ttags     txascii   view      watch\n\
-xread     xsteps    xx\n\
-yama";
+keep      log       mhennig   naked     nelsen    optcode   outgroup\n\
+procedure quote     reroot    resample  steps     tchoose   tlist\n\
+tplot     tread     tsave     tsvg      ttags     txascii   view\n\
+watch     xread     xsteps    xx        yama";
 
 /// Rendered result for an `apo` command before it is written or printed.
 enum ApoOutput {
