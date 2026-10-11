@@ -25,9 +25,9 @@ const ASSIST_CMD_LIST: &str = "\
 apo       assist    batch     bb        bytes     ccode     cget\n\
 ckeep     display   erase     files     get       hennig    ie\n\
 keep      log       mhennig   naked     nelsen    optcode   outgroup\n\
-procedure quote     reroot    resample  steps     tchoose   tlist\n\
-tplot     tread     tsave     tsvg      ttags     txascii   view\n\
-watch     xread     xsteps    xx        yama";
+procedure quote     reroot    resample  rseed     steps     tchoose\n\
+tlist     tplot     tread     tsave     tsvg      ttags     txascii\n\
+view      watch     xread     xsteps    xx        yama";
 
 /// Rendered result for an `apo` command before it is written or printed.
 enum ApoOutput {
@@ -2069,6 +2069,18 @@ impl Vm {
             Command::Watch(on) => {
                 self.state.watch_enabled = on;
                 self.state.write_line(&format!("watch *")).map_err(Error::from)?;
+            }
+            Command::RSeed(seed) => {
+                match seed {
+                    RSeedCmd::Query => {}
+                    RSeedCmd::Set(value) => crate::engines::search::set_random_seed(value),
+                    RSeedCmd::Random => crate::engines::search::set_random_seed(
+                        (crate::engines::search::random_seed_from_system() as u32) as u64,
+                    ),
+                }
+                self.state
+                    .write_line(&crate::engines::search::random_seed().to_string())
+                    .map_err(Error::from)?;
             }
 
             Command::XxQuery => {

@@ -68,10 +68,32 @@ impl Parser {
         };
         self.bump();
 
-        if let Some(index) = compact_tplot_index(&name) {
+        /* Accept compact seed form such as `rs5;`. */
+        if let Some(digits) = name
+            .get(..2)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("rs"))
+            .and_then(|_| name.get(2..))
+            .filter(|s| !s.is_empty())
+        {
+            if digits.bytes().all(|b| b.is_ascii_digit()) {
+                let seed = digits
+                    .parse::<u64>()
+                    .map_err(|_| self.err_parse("invalid u64", Some(tok.span)))?;
+                self.expect_semi()?;
+                let span = Span::new(start, self.last_end());
+                return Ok(Spanned::new(Command::RSeed(RSeedCmd::Set(seed)), span));
+            }
+        }
+
+        if let Some(index) = compact_numeric_suffix(&name, &["tplot", "tp"]) {
             self.expect_semi()?;
             let span = Span::new(start, self.last_end());
             return Ok(Spanned::new(Command::TPlot(vec![TreeSelector::Index(index)]), span));
+        }
+        if let Some(index) = compact_numeric_suffix(&name, &["tchoose", "tc"]) {
+            self.expect_semi()?;
+            let span = Span::new(start, self.last_end());
+            return Ok(Spanned::new(Command::TChoose(vec![TreeSelector::Index(index)]), span));
         }
 
         /* alias name */
@@ -556,6 +578,16 @@ impl Parser {
             let on = !self.try_consume_discriminant(TokenKind::Minus);
             self.expect_semi()?;
             Command::Watch(on)
+        } else if eq_ci(name_norm, "rseed") {
+            let seed = if self.try_consume_discriminant(TokenKind::Star) {
+                RSeedCmd::Random
+            } else if self.peek().map(|t| t.kind == TokenKind::Semi).unwrap_or(false) {
+                RSeedCmd::Query
+            } else {
+                RSeedCmd::Set(self.parse_u64()?)
+            };
+            self.expect_semi()?;
+            Command::RSeed(seed)
         } else if eq_ci(name_norm, "yama") {
             self.expect_semi()?;
             Command::Yama
@@ -891,6 +923,16 @@ impl Parser {
             _ => Err(self.err_parse("expected number", Some(tok.span))),
         }
     }
+    fn parse_u64(&mut self) -> Result<u64> {
+        let tok = self.peek().cloned().ok_or_else(|| self.err_parse("expected number", None))?;
+        match tok.kind {
+            TokenKind::Number(s) => {
+                self.bump();
+                s.parse::<u64>().map_err(|_| self.err_parse("invalid u64", Some(tok.span)))
+            }
+            _ => Err(self.err_parse("expected number", Some(tok.span))),
+        }
+    }
     /// consumes a small numeric slot index for tree/code files.
 
     fn parse_u8(&mut self) -> Result<u8> {
@@ -1156,9 +1198,9 @@ fn token_to_string(tok: &Token) -> String {
 }
 
 /// accepts compact legacy tplot selectors such as `tp1;` as `tplot 1;`.
-fn compact_tplot_index(name: &str) -> Option<usize> {
+fn compact_numeric_suffix(name: &str, prefixes: &[&str]) -> Option<usize> {
     let lower = name.to_ascii_lowercase();
-    let rest = lower.strip_prefix("tplot").or_else(|| lower.strip_prefix("tp"))?;
+    let rest = prefixes.iter().find_map(|prefix| lower.strip_prefix(prefix))?;
     if rest.is_empty() || !rest.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
     }
@@ -1246,6 +1288,7 @@ fn normalize_cmd_name(name: &str) -> &str {
         ("quote", 1),     /* q... */
         ("reroot", 1),    /* r... */
         ("resample", 3),  /* res... */
+        ("rseed", 2),     /* rs... */
         ("steps", 1),     /* s... */
         ("tchoose", 2),   /* tc... */
         ("tlist", 2),     /* tl... */

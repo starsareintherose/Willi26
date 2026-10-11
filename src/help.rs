@@ -218,6 +218,15 @@ static TOPICS: &[HelpTopic] = &[
         ],
     },
     HelpTopic {
+        name: "rseed",
+        summary: "query or set random seed",
+        details: &[
+            "rseed;          display current random seed",
+            "rseed x;        set random seed to x",
+            "rseed *;        choose a random seed",
+        ],
+    },
+    HelpTopic {
         name: "steps",
         summary: "display max/min steps per character",
         details: &["steps;          display max/min steps per character"],

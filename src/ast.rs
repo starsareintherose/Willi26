@@ -118,6 +118,7 @@ pub enum Command {
     Steps,
 
     Watch(bool),
+    RSeed(RSeedCmd),
     Bytes, /* bytes; */
 
     /* quit */
@@ -154,6 +155,13 @@ pub enum ResampleCmd {
         delete_percent: f64,
         search: Vec<ResampleSearchStep>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RSeedCmd {
+    Query,
+    Set(u64),
+    Random,
 }
 
 /// Search steps used inside one resampling replicate.

@@ -15,11 +15,31 @@ pub const NSTATES: usize = 36;
 /// Sentinel infinity value for additive DP cost arrays.
 pub const INF: u64 = u64::MAX / 8;
 
-/// Returns a deterministic seed sequence rooted at 42.
+static RANDOM_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(42);
+
+pub fn set_random_seed(seed: u64) {
+    RANDOM_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn random_seed() -> u64 {
+    RANDOM_SEED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Returns a reproducible seed sequence rooted at the configured random seed.
 pub fn entropy_seed() -> u64 {
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    crate::engines::rng::splitmix64(42 ^ crate::engines::rng::splitmix64(nonce))
+    crate::engines::rng::splitmix64(random_seed() ^ crate::engines::rng::splitmix64(nonce))
+}
+
+/// Produces a seed from standard-library system entropy sources only.
+pub fn random_seed_from_system() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    crate::engines::rng::splitmix64(time ^ NONCE.fetch_add(1, Ordering::Relaxed))
 }
 
 /* Fitch merge */
