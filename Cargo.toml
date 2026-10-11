@@ -1,6 +1,6 @@
 [package]
 name = "willi26"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 authors = ["Guoyi Zhang <starsareintherose@gmail.com>"]
 description = "An interactive parsimony phylogenetic analysis program inspired by Hennig86."
