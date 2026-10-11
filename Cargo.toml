@@ -8,9 +8,9 @@ license = "AGPL-3.0-or-later"
 keywords = ["bioinformatics", "evolution", "parsimony", "phylogenetics", "phylogeny"]
 categories = ["command-line-utilities", "science"]
 
-homepage = "https://github.com/starsareintherose/Willi26"
+homepage = "https://willi26.malacology.net"
 repository = "https://github.com/starsareintherose/Willi26"
-documentation = "https://docs.rs/willi26"
+documentation = "https://willi26.malacology.net/commands/latest/"
 readme = "README.md"
 
 include = [
